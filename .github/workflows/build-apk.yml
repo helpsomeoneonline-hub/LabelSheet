@@ -34,7 +34,7 @@ jobs:
         with:
           gradle-version: "8.9"
 
-      - name: Reconstruct and verify source
+      - name: Reconstruct verified 1.0 source
         shell: bash
         run: |
           cat source-b64/part-aa.txt source-b64/part-ab.txt source-b64/part-ac.txt source-b64/part-ad.txt source-b64/part-ae.txt > source.b64
@@ -42,16 +42,19 @@ jobs:
           echo "028e0e7902d7fd29e18d1f89281712b0f12e68290408739d9aa0f4028b56545e  LabelSheet-source.zip" | sha256sum -c -
           unzip -q LabelSheet-source.zip
 
+      - name: Apply 1.1 feature patch
+        run: python3 patch-v1.1.py
+
       - name: Build debug APK
         working-directory: lsbuild
         run: gradle --no-daemon :app:assembleDebug
 
       - name: Rename APK
-        run: cp lsbuild/app/build/outputs/apk/debug/app-debug.apk LabelSheet-1.0.0.apk
+        run: cp lsbuild/app/build/outputs/apk/debug/app-debug.apk LabelSheet-1.1.0.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: LabelSheet-1.0.0-apk
-          path: LabelSheet-1.0.0.apk
+          name: LabelSheet-1.1.0-apk
+          path: LabelSheet-1.1.0.apk
           if-no-files-found: error
