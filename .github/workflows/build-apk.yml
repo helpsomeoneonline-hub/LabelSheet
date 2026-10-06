@@ -25,9 +25,7 @@ jobs:
       - name: Install Android 35
         shell: bash
         run: |
-          echo "ANDROID_HOME=$ANDROID_HOME"
           SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -type f -path "*/bin/sdkmanager" | sort -V | tail -n 1)"
-          echo "Using $SDKMANAGER"
           yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
           "$SDKMANAGER" "platform-tools" "platforms;android-35" "build-tools;35.0.0"
 
@@ -36,8 +34,13 @@ jobs:
         with:
           gradle-version: "8.9"
 
-      - name: Unpack source
-        run: unzip -q LabelSheet-build.zip
+      - name: Reconstruct and verify source
+        shell: bash
+        run: |
+          cat source-b64/part-aa.txt source-b64/part-ab.txt source-b64/part-ac.txt source-b64/part-ad.txt source-b64/part-ae.txt > source.b64
+          base64 --decode source.b64 > LabelSheet-source.zip
+          echo "028e0e7902d7fd29e18d1f89281712b0f12e68290408739d9aa0f4028b56545e  LabelSheet-source.zip" | sha256sum -c -
+          unzip -q LabelSheet-source.zip
 
       - name: Build debug APK
         working-directory: lsbuild
