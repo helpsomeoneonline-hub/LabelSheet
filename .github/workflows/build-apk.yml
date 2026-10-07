@@ -62,7 +62,8 @@ jobs:
       - name: Apply 1.4 feature patch
         shell: bash
         run: |
-          base64 --decode patch-v1.4.0.gz.b64 | gzip -d > /tmp/LabelSheet-1.4.0.patch
+          cat patch-v1.4/part00.txt patch-v1.4/part01.txt patch-v1.4/part02.txt patch-v1.4/part03.txt patch-v1.4/part04.txt > /tmp/patch-v1.4.0.b64
+          base64 --decode /tmp/patch-v1.4.0.b64 | gzip -d > /tmp/LabelSheet-1.4.0.patch
           cd lsbuild
           patch -p2 < /tmp/LabelSheet-1.4.0.patch
 
