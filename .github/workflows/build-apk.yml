@@ -67,6 +67,9 @@ jobs:
           cd lsbuild
           patch -p2 < /tmp/LabelSheet-1.4.0.patch
 
+      - name: Fix 1.4 status string
+        run: python3 fix-v1.4.py
+
       - name: Build debug APK
         working-directory: lsbuild
         run: gradle --no-daemon :app:assembleDebug
