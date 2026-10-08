@@ -70,16 +70,23 @@ jobs:
       - name: Fix 1.4 status string
         run: python3 fix-v1.4.py
 
+      - name: Apply 1.5 print and resize patch
+        shell: bash
+        run: |
+          base64 --decode patch-v1.5.0.gz.b64 | gzip -d > /tmp/LabelSheet-1.5.0.patch
+          cd lsbuild
+          patch -p2 < /tmp/LabelSheet-1.5.0.patch
+
       - name: Build debug APK
         working-directory: lsbuild
         run: gradle --no-daemon :app:assembleDebug
 
       - name: Rename APK
-        run: cp lsbuild/app/build/outputs/apk/debug/app-debug.apk LabelSheet-1.4.0.apk
+        run: cp lsbuild/app/build/outputs/apk/debug/app-debug.apk LabelSheet-1.5.0.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: LabelSheet-1.4.0-apk
-          path: LabelSheet-1.4.0.apk
+          name: LabelSheet-1.5.0-apk
+          path: LabelSheet-1.5.0.apk
           if-no-files-found: error
