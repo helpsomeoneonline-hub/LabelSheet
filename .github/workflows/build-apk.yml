@@ -80,7 +80,7 @@ jobs:
       - name: Apply 1.6 editor workflow patch
         shell: bash
         run: |
-          cat patch-v1.6/part00.txt patch-v1.6/part01.txt patch-v1.6/part02.txt > /tmp/patch-v1.6.0.b64
+          cat patch-v1.6/part00.txt patch-v1.6/part01.txt > /tmp/patch-v1.6.0.b64
           base64 --decode /tmp/patch-v1.6.0.b64 | gzip -d > /tmp/LabelSheet-1.6.0.patch
           cd lsbuild
           patch -p1 < /tmp/LabelSheet-1.6.0.patch
