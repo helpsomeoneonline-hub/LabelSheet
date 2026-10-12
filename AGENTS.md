@@ -14,4 +14,4 @@ Before calling anything complete: run available builds, tests and lint, verify c
 - https://mobbin.com/ (optional account)
 - https://www.figma.com/ (optional linked account)
 - https://context7.com/ (optional developer documentation)
-See docs/APP_DESIGN_QUALITY.md.
+See docs/APP_DESIGN_QUALITY.md and docs/FEATURE_DISCOVERY.md. Before substantial feature work, proactively propose 3–5 overlooked improvements ranked by real usefulness, confidence, complexity, and regression risk. Do not introduce third-party tracking or send user assets to external services without explicit approval.

@@ -2,7 +2,7 @@ name: Build LabelSheet APK
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "improve/accessible-editor-v1-7" ]
   workflow_dispatch:
 
 permissions:
@@ -85,16 +85,19 @@ jobs:
           cd lsbuild
           patch -p1 < /tmp/LabelSheet-1.6.0.patch
 
+      - name: Apply 1.7 batch editing and editor usability patch
+        run: python3 patch-v1.7.py
+
       - name: Build debug APK
         working-directory: lsbuild
         run: gradle --no-daemon :app:assembleDebug
 
       - name: Rename APK
-        run: cp lsbuild/app/build/outputs/apk/debug/app-debug.apk LabelSheet-1.6.0.apk
+        run: cp lsbuild/app/build/outputs/apk/debug/app-debug.apk LabelSheet-1.7.0.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: LabelSheet-1.6.0-apk
-          path: LabelSheet-1.6.0.apk
+          name: LabelSheet-1.7.0-apk
+          path: LabelSheet-1.7.0.apk
           if-no-files-found: error
