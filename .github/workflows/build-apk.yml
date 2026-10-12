@@ -2,7 +2,7 @@ name: Build LabelSheet APK
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "improve/accessible-editor-v1-7" ]
   workflow_dispatch:
 
 permissions:
@@ -84,6 +84,27 @@ jobs:
           base64 --decode /tmp/patch-v1.6.0.b64 | gzip -d > /tmp/LabelSheet-1.6.0.patch
           cd lsbuild
           patch -p1 < /tmp/LabelSheet-1.6.0.patch
+
+      - name: Inspect current editor APIs
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          files=[
+            Path("lsbuild/app/src/main/java/com/byso/labelsheet/LetterCanvasView.java"),
+            Path("lsbuild/app/src/main/java/com/byso/labelsheet/MainActivity.java")]
+          markers=["selectedSet","selectedIndices","getSelected","getSelection","setSelected","toggleMulti","showLayoutTools","applyQuickBorder","copyFormat","pasteFormat","rotateSelected","class MainActivity","makeCompactButton","buildLandscapeUi","rowParams"]
+          for path in files:
+              s=path.read_text().splitlines()
+              hits=[i for i,l in enumerate(s) if any(m in l for m in markers)]
+              keep=set()
+              for i in hits:
+                  for j in range(max(0,i-5),min(len(s),i+17)):
+                      keep.add(j)
+              print("======",path,"line count",len(s))
+              for i in sorted(keep):
+                  print(f"{i+1:04d} {s[i]}")
+          PY
 
       - name: Build debug APK
         working-directory: lsbuild
