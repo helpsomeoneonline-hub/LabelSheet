@@ -71,7 +71,7 @@ new_methods = r'''
     }
 
     public int applyBulkSizeInches(float widthIn, float heightIn) {
-        if (!Float.isFinite(widthIn) || !Float.isFinite(heightIn)
+        if (!(!Float.isNaN(widthIn) && !Float.isInfinite(widthIn)) || !(!Float.isNaN(heightIn) && !Float.isInfinite(heightIn))
                 || widthIn <= 0 || heightIn <= 0) return 0;
         float pageW = portrait ? 8.5f : 11f, pageH = portrait ? 11f : 8.5f;
         if (widthIn > pageW || heightIn > pageH) return 0;
@@ -110,7 +110,7 @@ new_methods = r'''
             float ct = clamp((float) data.optDouble("cropTop", 0), 0f, 0.45f);
             float cr = clamp((float) data.optDouble("cropRight", 0), 0f, 0.45f);
             float cb = clamp((float) data.optDouble("cropBottom", 0), 0f, 0.45f);
-            if (!Float.isFinite(rot)) return 0;
+            if (Float.isNaN(rot) || Float.isInfinite(rot)) return 0;
             cr = Math.min(cr, 0.85f - cl);
             cb = Math.min(cb, 0.85f - ct);
             int changed = 0;
@@ -191,14 +191,16 @@ m = once(m,'''row2, rowParams(42));''','''row2, rowParams(48));''',"portrait row
 m = once(m,'''row3, rowParams(42));''','''row3, rowParams(48));''',"portrait row3")
 
 bulk_ui = r'''
-    private void performBulkEdit(java.util.function.IntSupplier operation, String name) {
+    private interface BulkOperation { int apply(); }
+
+    private void performBulkEdit(BulkOperation operation, String name) {
         int available = canvasView.countEditableSelected();
         if (available < 1) {
             showToast("Select one or more unlocked pictures first.");
             return;
         }
         pushUndo();
-        int changed = operation.getAsInt();
+        int changed = operation.apply();
         if (changed > 0) {
             redo.clear();
             showToast(name + " applied to " + changed + " picture(s). Undo reverses all.");
