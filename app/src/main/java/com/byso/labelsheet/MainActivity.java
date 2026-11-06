@@ -34,6 +34,7 @@ import android.view.WindowInsets;
 import android.view.View;
 import android.view.MotionEvent;
 import android.widget.Button;
+import android.widget.FrameLayout;
 import android.widget.CheckBox;
 import android.widget.HorizontalScrollView;
 import android.widget.EditText;
@@ -72,6 +73,8 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
     private boolean restoringHistory = false;
     private volatile boolean printPreparing = false;
     private QuickActionsBar quickBar;
+    private FrameLayout canvasHost;
+    private View cropOverlay;
 
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -107,6 +110,9 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
         canvasView.setDefaultNewImageBorder(getSharedPreferences("editor", MODE_PRIVATE)
                 .getBoolean("auto_border", true) ? 2f : 0f);
         canvasView.setListener(this);
+        canvasHost = new FrameLayout(this);
+        canvasHost.addView(canvasView, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
         quickBar = new QuickActionsBar(this, shortcutSources(), this::printSheet, this::showBorderDialog);
         statusText = new TextView(this);
         statusText.setTextColor(0xFF40526F);
@@ -124,7 +130,7 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
         addButton.setOnClickListener(v -> chooseImage(false));
 
         cropButton = makeCompactButton("Crop", false);
-        cropButton.setOnClickListener(v -> launchVisualCrop());
+        cropButton.setOnClickListener(v -> showInlineCrop());
 
         borderButton = makeCompactButton("Border", false);
         borderButton.setOnClickListener(v -> applyQuickBorder());
@@ -211,7 +217,7 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
         hint.setText("Corners = proportional resize • side handles = width/height • pinch = canvas zoom");
         hint.setTextColor(0xFF5F728C); hint.setTextSize(11); hint.setGravity(Gravity.CENTER); hint.setPadding(dp(8), 0, dp(8), dp(4));
         root.addView(hint);
-        root.addView(canvasView, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+        root.addView(canvasHost, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
         root.addView(statusText);
     }
 
@@ -234,7 +240,7 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
 
         LinearLayout right = new LinearLayout(this); right.setOrientation(LinearLayout.VERTICAL);
         right.addView(quickBar, rowParams(55));
-        right.addView(canvasView, new LinearLayout.LayoutParams(0 + LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+        right.addView(canvasHost, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
         right.addView(statusText);
         root.addView(right, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f));
     }
@@ -933,6 +939,104 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
                     updateControls();
                 })
                 .show();
+    }
+
+
+    /** Live crop overlay: no new activity, screen rotation or canvas layout resize. */
+    private void showInlineCrop() {
+        if (!canvasView.hasSelection() || canvasView.isSelectedLocked()) {
+            showToast("Select an unlocked label first."); return;
+        }
+        if (cropOverlay != null) return;
+        final float[] original = canvasView.getSelectedCrop();
+        final int[] values = new int[] {
+                Math.round(original[0] * 100f), Math.round(original[1] * 100f),
+                Math.round(original[2] * 100f), Math.round(original[3] * 100f)
+        };
+        pushUndo();
+
+        FrameLayout scrim = new FrameLayout(this);
+        scrim.setClickable(true);
+        scrim.setBackgroundColor(0x44000000);
+        cropOverlay = scrim;
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPadding(dp(14), dp(10), dp(14), dp(8));
+        GradientDrawable background = new GradientDrawable();
+        background.setColor(0xFFFAFCFF);
+        background.setCornerRadii(new float[]{dp(18),dp(18),dp(18),dp(18),0,0,0,0});
+        panel.setBackground(background);
+
+        TextView title = new TextView(this);
+        title.setText("Crop label  •  adjust edges below");
+        title.setTextColor(0xFF1F3458);
+        title.setTextSize(16);
+        title.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        panel.addView(title);
+        String[] names = new String[]{"Left", "Top", "Right", "Bottom"};
+        for (int i = 0; i < 4; i++) {
+            final int idx = i;
+            LinearLayout line = new LinearLayout(this);
+            line.setOrientation(LinearLayout.HORIZONTAL);
+            line.setGravity(Gravity.CENTER_VERTICAL);
+            TextView label = new TextView(this);
+            label.setText(names[i] + " " + values[i] + "%");
+            label.setTextColor(0xFF33496F);
+            label.setTextSize(12);
+            line.addView(label, new LinearLayout.LayoutParams(dp(84), dp(36)));
+            SeekBar seek = new SeekBar(this);
+            seek.setMax(45);
+            seek.setProgress(values[i]);
+            seek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+                @Override public void onProgressChanged(SeekBar bar, int progress, boolean user) {
+                    values[idx] = progress;
+                    if (values[0] + values[2] > 85) values[idx] = 85 - values[idx == 0 ? 2 : 0];
+                    if (values[1] + values[3] > 85) values[idx] = 85 - values[idx == 1 ? 3 : 1];
+                    if (values[idx] != progress) { bar.setProgress(values[idx]); return; }
+                    label.setText(names[idx] + " " + values[idx] + "%");
+                    canvasView.setSelectedCrop(values[0]/100f, values[1]/100f,
+                            values[2]/100f, values[3]/100f);
+                }
+                @Override public void onStartTrackingTouch(SeekBar bar) {}
+                @Override public void onStopTrackingTouch(SeekBar bar) {}
+            });
+            line.addView(seek, new LinearLayout.LayoutParams(0, dp(36), 1f));
+            panel.addView(line);
+        }
+        LinearLayout actions = new LinearLayout(this);
+        actions.setGravity(Gravity.END);
+        Button cancel = makeButton("Cancel", false);
+        cancel.setOnClickListener(v -> {
+            canvasView.setSelectedCrop(original[0],original[1],original[2],original[3]);
+            undo.pollFirst();
+            canvasHost.removeView(scrim);
+            cropOverlay = null;
+            updateControls();
+        });
+        Button reset = makeButton("Reset", false);
+        reset.setOnClickListener(v -> {
+            canvasView.setSelectedCrop(0f,0f,0f,0f);
+            canvasHost.removeView(scrim);
+            cropOverlay = null;
+            redo.clear();
+            updateControls();
+        });
+        Button done = makeButton("Apply", true);
+        done.setOnClickListener(v -> {
+            redo.clear();
+            Diagnostics.log("INLINE_CROP_APPLIED", "crop adjusted on page");
+            canvasHost.removeView(scrim);
+            cropOverlay = null;
+            updateControls();
+        });
+        actions.addView(cancel); actions.addView(reset); actions.addView(done);
+        panel.addView(actions);
+        FrameLayout.LayoutParams p = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM);
+        scrim.addView(panel, p);
+        canvasHost.addView(scrim, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        Diagnostics.log("INLINE_CROP_OPENED", "editor stays in place");
     }
 
     private void launchVisualCrop() {
