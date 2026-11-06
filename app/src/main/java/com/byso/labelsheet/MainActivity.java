@@ -676,16 +676,18 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
         Diagnostics.log("PRINT_PREFLIGHT_STARTED", "preferred=" + PrinterWake.normalizeHost(preferred) + ", scan=192.168.58.100-110");
         showToast("Finding and waking Canon printer…");
         new Thread(() -> {
-            final PrinterWake.Result result = PrinterWake.findAndWake(preferred);
+            final PrinterWake.Result result = PrinterWake.reconnectForPrint(preferred, prefs.getBoolean("aggressive_reconnect", true));
             if (result != null && !result.host.equals(PrinterWake.normalizeHost(preferred))) {
                 prefs.edit().putString("host", result.host).apply();
                 Diagnostics.log("PRINTER_IP_UPDATED", "old=" + PrinterWake.normalizeHost(preferred) + ", new=" + result.host);
             }
             runOnUiThread(() -> {
                 if (result != null) {
-                    Diagnostics.log("PRINT_PRINTER_READY", "host=" + result.host + ", port=" + result.port + (result.discovered ? ", discovered=true" : ""));
+                    Diagnostics.log("PRINT_SERVICE_REACHABLE", "host=" + result.host + ", port=" + result.port +
+                            (result.discovered ? ", discovered=true" : "") +
+                            "; physical print outcome is not yet known");
                     updateStatus();
-                    showToast("Printer ready at " + result.host + ". Opening print…");
+                    showToast("Printer network service responding at " + result.host + ". Opening Android print…");
                     // Give Android's print service a moment to rediscover a printer whose DHCP address changed.
                     canvasView.postDelayed(() -> {
                         printPreparing = false;
@@ -693,7 +695,7 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
                     }, 1200);
                 } else {
                     Diagnostics.log("PRINT_PRINTER_NOT_FOUND", "searched=192.168.58.100-110; falling back to Android print service");
-                    showToast("Canon did not answer the scan. Opening Android print anyway.");
+                    showToast("Printer still not responding. Check Canon Auto Power On, or choose it in Android Print.");
                     canvasView.postDelayed(() -> {
                         printPreparing = false;
                         openSystemPrintDialog(null);
@@ -1148,7 +1150,7 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
         showToast("Finding Canon printer on 192.168.58.100–110…");
         Diagnostics.log("PRINTER_WAKE_STARTED", "preferred=" + PrinterWake.normalizeHost(preferred) + ", scan=192.168.58.100-110");
         new Thread(() -> {
-            final PrinterWake.Result result = PrinterWake.findAndWake(preferred);
+            final PrinterWake.Result result = PrinterWake.reconnectForPrint(preferred, prefs.getBoolean("aggressive_reconnect", true));
             if (result != null && !result.host.equals(PrinterWake.normalizeHost(preferred))) {
                 prefs.edit().putString("host", result.host).apply();
                 Diagnostics.log("PRINTER_IP_UPDATED", "old=" + PrinterWake.normalizeHost(preferred) + ", new=" + result.host);
@@ -1156,11 +1158,22 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
             runOnUiThread(() -> {
                 if (result != null) {
                     Diagnostics.log("PRINTER_WAKE_SUCCESS", "host=" + result.host + ", port=" + result.port + (result.discovered ? ", discovered=true" : ""));
-                    showToast("Canon printer found at " + result.host + ". Tap Print.");
+                    new AlertDialog.Builder(this)
+                            .setTitle("Printer connection checked")
+                            .setMessage(result.host + "\n" + PrinterWake.serviceDescription(result) +
+                                    "\n\nThis does not confirm that a physical page will print. " +
+                                    "Check Canon Auto Power On and Auto Power Off settings if it becomes unreachable after being idle.")
+                            .setPositiveButton("Print", (d, w) -> printSheet())
+                            .setNegativeButton("Close", null).show();
                     updateStatus();
                 } else {
                     Diagnostics.log("PRINTER_WAKE_NO_RESPONSE", "searched=192.168.58.100-110");
-                    showToast("No printer responded in 192.168.58.100–110. Check that the printer and phone are on the same Wi-Fi.");
+                    new AlertDialog.Builder(this)
+                            .setTitle("Printer did not respond")
+                            .setMessage("No network print service answered. Check printer power, Wi-Fi, " +
+                                    "and Canon Auto Power On. A detected IP address does not prove it can accept a job.")
+                            .setPositiveButton("Retry", (d, w) -> wakePrinter())
+                            .setNegativeButton("Close", null).show();
                 }
             });
         }).start();
@@ -1191,6 +1204,12 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
         keepAlive.setChecked(prefs.getBoolean("keep_alive_enabled", true));
         box.addView(keepAlive);
 
+        CheckBox aggressive = new CheckBox(this);
+        aggressive.setText("Aggressive reconnect: retry network service before printing");
+        aggressive.setTextColor(Color.DKGRAY);
+        aggressive.setChecked(prefs.getBoolean("aggressive_reconnect", true));
+        box.addView(aggressive);
+
         TextView intervalLabel = new TextView(this);
         intervalLabel.setText("Wake interval in minutes (default 180 = 3 hours; minimum 15)");
         intervalLabel.setTextColor(Color.DKGRAY);
@@ -1204,7 +1223,10 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
         box.addView(intervalInput, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
 
         TextView note = new TextView(this);
-        note.setText("The app first tries the last working IP. If it no longer responds, it scans 192.168.58.100 through .110 and saves the new printer IP automatically. Runs even when the LabelSheet screen is closed. Android may delay a cycle during Doze/battery saving. Force-stopping the app stops scheduled work until you open it again.");
+        note.setText("Aggressive mode makes a few bounded reconnection attempts before scanning. " +
+                "Background checks are Android scheduled and may be delayed by battery saving. " +
+                "Canon Auto Power On must be enabled on compatible printers to accept wake-on-print. " +
+                "A reachable IP does not guarantee that a job is printed.");
         note.setTextColor(0xFF666666);
         note.setTextSize(12);
         note.setPadding(0, dp(8), 0, 0);
@@ -1230,6 +1252,7 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
             prefs.edit()
                     .putString("host", host)
                     .putBoolean("keep_alive_enabled", keepAlive.isChecked())
+                    .putBoolean("aggressive_reconnect", aggressive.isChecked())
                     .putInt("interval_minutes", minutes)
                     .apply();
             Diagnostics.log("PRINTER_SETTINGS_SAVED", "host=" + PrinterWake.normalizeHost(host) + ", keepAlive=" + keepAlive.isChecked() + ", interval=" + minutes);
@@ -1243,7 +1266,7 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
     private void restorePrinterKeepAliveSchedule() {
         SharedPreferences prefs = getSharedPreferences("printer", MODE_PRIVATE);
         if (prefs.getBoolean("keep_alive_enabled", true)) {
-            schedulePrinterKeepAlive(true, Math.max(DEFAULT_KEEPALIVE_MINUTES, prefs.getInt("interval_minutes", DEFAULT_KEEPALIVE_MINUTES)));
+            schedulePrinterKeepAlive(true, Math.max(15, prefs.getInt("interval_minutes", DEFAULT_KEEPALIVE_MINUTES)));
         }
     }
 
