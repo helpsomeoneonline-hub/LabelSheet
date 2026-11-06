@@ -32,6 +32,7 @@ import android.provider.MediaStore;
 import android.view.Gravity;
 import android.view.WindowInsets;
 import android.view.View;
+import android.view.MotionEvent;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.HorizontalScrollView;
@@ -70,6 +71,7 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
     private final Deque<String> redo = new ArrayDeque<>();
     private boolean restoringHistory = false;
     private volatile boolean printPreparing = false;
+    private QuickActionsBar quickBar;
 
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -89,7 +91,7 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
         boolean landscapeUi = getResources().getConfiguration().orientation == Configuration.ORIENTATION_LANDSCAPE;
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(landscapeUi ? LinearLayout.HORIZONTAL : LinearLayout.VERTICAL);
-        root.setBackgroundColor(Color.rgb(23, 26, 31));
+        root.setBackgroundColor(0xFFF2F6FC);
         root.setOnApplyWindowInsetsListener((v, insets) -> {
             int top = insets.getSystemWindowInsetTop();
             int bottom = insets.getSystemWindowInsetBottom();
@@ -102,10 +104,13 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
 
         createActionButtons();
         canvasView = new LetterCanvasView(this);
+        canvasView.setDefaultNewImageBorder(getSharedPreferences("editor", MODE_PRIVATE)
+                .getBoolean("auto_border", true) ? 2f : 0f);
         canvasView.setListener(this);
+        quickBar = new QuickActionsBar(this, shortcutSources(), this::printSheet, this::showBorderDialog);
         statusText = new TextView(this);
-        statusText.setTextColor(0xFFD7DEE7);
-        statusText.setBackgroundColor(0xFF20242B);
+        statusText.setTextColor(0xFF40526F);
+        statusText.setBackgroundColor(0xFFFFFFFF);
         statusText.setTextSize(11);
         statusText.setPadding(dp(10), dp(7), dp(10), dp(7));
 
@@ -171,10 +176,10 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
         stack.setOrientation(LinearLayout.VERTICAL);
         stack.setPadding(compact ? dp(8) : dp(16), compact ? dp(3) : dp(8), dp(8), compact ? dp(3) : dp(5));
         TextView title = new TextView(this);
-        title.setText("LabelSheet"); title.setTextColor(Color.WHITE); title.setTextSize(compact ? 18 : 22);
+        title.setText("✦ LabelSheet"); title.setTextColor(0xFF203456); title.setTextSize(compact ? 18 : 22);
         title.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
         TextView sub = new TextView(this);
-        sub.setText("8.5 × 11 in • Letter"); sub.setTextColor(0xFF9EA7B3); sub.setTextSize(compact ? 10 : 12);
+        sub.setText("Label Studio • 8.5 × 11 in"); sub.setTextColor(0xFF627897); sub.setTextSize(compact ? 10 : 12);
         stack.addView(title); stack.addView(sub); return stack;
     }
 
@@ -200,10 +205,11 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
         LinearLayout row2 = toolRow(); addToRow(row2, replaceButton, undoButton, redoButton, arrangeButton, pageButton, moreButton); root.addView(row2, rowParams(48));
         LinearLayout row3 = toolRow(); addToRow(row3, copyFormatButton, pasteFormatButton, lockButton, multiButton, layoutButton, bulkButton); root.addView(row3, rowParams(48));
         root.addView(makeZoomRow(), rowParams(40));
+        root.addView(quickBar, rowParams(55));
 
         TextView hint = new TextView(this);
         hint.setText("Corners = proportional resize • side handles = width/height • pinch = canvas zoom");
-        hint.setTextColor(0xFFB8C0CA); hint.setTextSize(11); hint.setGravity(Gravity.CENTER); hint.setPadding(dp(8), 0, dp(8), dp(4));
+        hint.setTextColor(0xFF5F728C); hint.setTextSize(11); hint.setGravity(Gravity.CENTER); hint.setPadding(dp(8), 0, dp(8), dp(4));
         root.addView(hint);
         root.addView(canvasView, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
         root.addView(statusText);
@@ -211,7 +217,7 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
 
     private void buildLandscapeUi(LinearLayout root) {
         LinearLayout left = new LinearLayout(this);
-        left.setOrientation(LinearLayout.VERTICAL); left.setBackgroundColor(0xFF1D2127); left.setPadding(dp(5), dp(2), dp(5), dp(2));
+        left.setOrientation(LinearLayout.VERTICAL); left.setBackgroundColor(0xFFFFFFFF); left.setPadding(dp(5), dp(2), dp(5), dp(2));
         left.addView(titleStack(true));
         LinearLayout printRow = toolRow(); addToRow(printRow, makeWakeButton(), makePrintButton()); left.addView(printRow, rowParams(48));
         addPair(left, addButton, cropButton); addPair(left, borderButton, rotateButton); addPair(left, duplicateButton, deleteButton);
@@ -227,6 +233,7 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
         root.addView(rail, new LinearLayout.LayoutParams(dp(224), LinearLayout.LayoutParams.MATCH_PARENT));
 
         LinearLayout right = new LinearLayout(this); right.setOrientation(LinearLayout.VERTICAL);
+        right.addView(quickBar, rowParams(55));
         right.addView(canvasView, new LinearLayout.LayoutParams(0 + LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
         right.addView(statusText);
         root.addView(right, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f));
@@ -241,6 +248,20 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
     private void addToRow(LinearLayout row, Button... buttons) { for (Button b : buttons) row.addView(b); }
 
     private void addPair(LinearLayout parent, Button a, Button b) { LinearLayout row = toolRow(); addToRow(row, a, b); parent.addView(row, rowParams(48)); }
+
+
+    private java.util.LinkedHashMap<String, Button> shortcutSources() {
+        java.util.LinkedHashMap<String, Button> s = new java.util.LinkedHashMap<>();
+        s.put("+ Add", addButton); s.put("Crop", cropButton); s.put("Border", borderButton);
+        s.put("Rotate", rotateButton); s.put("Duplicate", duplicateButton);
+        s.put("Delete", deleteButton); s.put("Replace", replaceButton);
+        s.put("Undo", undoButton); s.put("Redo", redoButton);
+        s.put("Arrange", arrangeButton); s.put("Page ↻", pageButton);
+        s.put("Copy Fmt", copyFormatButton); s.put("Paste Fmt", pasteFormatButton);
+        s.put("Lock", lockButton); s.put("Multi", multiButton);
+        s.put("Layout", layoutButton); s.put("Edit All", bulkButton);
+        return s;
+    }
 
     private Button makeFitSelectionButton() {
         Button b = makeCompactButton("Fit Sel", false); b.setOnClickListener(v -> { if (!canvasView.fitSelection()) showToast("Select a picture first."); updateStatus(); }); return b;
@@ -453,6 +474,9 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
 
     private void showMoreMenu(View anchor) {
         PopupMenu menu = new PopupMenu(this, anchor);
+        menu.getMenu().add("Editor preferences");
+        menu.getMenu().add("My tool usage");
+        menu.getMenu().add("Customize quick tools");
         menu.getMenu().add("Test Printer Connection");
         menu.getMenu().add("Printer Keep-Awake Settings");
         menu.getMenu().add("Export Letter PDF");
@@ -462,7 +486,11 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
         menu.getMenu().add("About / Troubleshooting");
         menu.setOnMenuItemClickListener(item -> {
             String t = String.valueOf(item.getTitle());
-            if (t.startsWith("Test Printer")) wakePrinter();
+            UsageInsights.record(this, t);
+            if (t.startsWith("Editor preferences")) showEditorPreferences();
+            else if (t.startsWith("My tool usage")) showUsageInsights();
+            else if (t.startsWith("Customize quick")) quickBar.setArranging(true);
+            else if (t.startsWith("Test Printer")) wakePrinter();
             else if (t.startsWith("Printer Keep-Awake")) showPrinterSettingsDialog(false);
             else if (t.startsWith("Export Letter")) exportPdf();
             else if (t.startsWith("Copy Diagnostic")) copyLog();
@@ -472,6 +500,50 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
             return true;
         });
         menu.show();
+    }
+
+
+    private void showEditorPreferences() {
+        SharedPreferences prefs = getSharedPreferences("editor", MODE_PRIVATE);
+        LinearLayout form = new LinearLayout(this);
+        form.setOrientation(LinearLayout.VERTICAL);
+        form.setPadding(dp(20), dp(8), dp(20), dp(8));
+        CheckBox border = new CheckBox(this);
+        border.setText("Add a 2 pt black border to every new picture");
+        border.setChecked(prefs.getBoolean("auto_border", true));
+        form.addView(border);
+        CheckBox adaptive = new CheckBox(this);
+        adaptive.setText("Suggest my most-used tools after 20 taps");
+        adaptive.setChecked(prefs.getBoolean("smart_tools", true));
+        form.addView(adaptive);
+        new AlertDialog.Builder(this).setTitle("Editor preferences").setView(form)
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Save", (d, w) -> {
+                    prefs.edit().putBoolean("auto_border", border.isChecked())
+                            .putBoolean("smart_tools", adaptive.isChecked()).apply();
+                    canvasView.setDefaultNewImageBorder(border.isChecked() ? 2f : 0f);
+                    quickBar.refresh();
+                    Diagnostics.log("EDITOR_PREFS_CHANGED", "auto_border=" + border.isChecked());
+                }).show();
+    }
+
+    private void showUsageInsights() {
+        new AlertDialog.Builder(this).setTitle("My tool usage")
+                .setMessage(UsageInsights.report(this))
+                .setNegativeButton("Close", null)
+                .setNeutralButton("Reset counts", (d, w) ->
+                        new AlertDialog.Builder(this).setTitle("Reset usage counts?")
+                                .setMessage("This does not change any saved labels.")
+                                .setNegativeButton("Cancel", null)
+                                .setPositiveButton("Reset", (q, k) -> {
+                                    UsageInsights.clear(this);
+                                    quickBar.refresh();
+                                }).show())
+                .setPositiveButton("Copy", (d, w) -> {
+                    ClipboardManager cm = (ClipboardManager)getSystemService(Context.CLIPBOARD_SERVICE);
+                    if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("LabelSheet usage", UsageInsights.report(this)));
+                    showToast("Usage report copied.");
+                }).show();
     }
 
     private void chooseImage(boolean replace) {
