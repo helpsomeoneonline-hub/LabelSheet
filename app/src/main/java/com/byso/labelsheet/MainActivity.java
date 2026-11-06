@@ -868,7 +868,7 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
         b.setText(text);
         b.setTextSize(12);
         b.setAllCaps(false);
-        b.setTextColor(Color.WHITE);
+        b.setTextColor(0xFF203456);
         b.setGravity(Gravity.CENTER);
         b.setMinHeight(0);
         b.setMinWidth(0);
@@ -876,7 +876,8 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
         LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(40));
         p.setMargins(dp(4), 0, dp(4), 0);
         b.setLayoutParams(p);
-        applyButtonBackground(b, primary ? 0xFF19B5A5 : 0xFF343A44, true);
+        applyButtonBackground(b, primary ? 0xFF2563EB : 0xFFFFFFFF, true);
+        attachUsageTracking(b);
         return b;
     }
 
@@ -885,7 +886,7 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
         b.setText(text);
         b.setTextSize(12);
         b.setAllCaps(false);
-        b.setTextColor(Color.WHITE);
+        b.setTextColor(0xFF203456);
         b.setGravity(Gravity.CENTER);
         b.setMinHeight(0);
         b.setMinWidth(0);
@@ -893,7 +894,8 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
         LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f);
         p.setMargins(dp(2), 0, dp(2), 0);
         b.setLayoutParams(p);
-        applyButtonBackground(b, primary ? 0xFF19B5A5 : 0xFF343A44, true);
+        applyButtonBackground(b, primary ? 0xFF2563EB : 0xFFFFFFFF, true);
+        attachUsageTracking(b);
         return b;
     }
 
@@ -1169,12 +1171,26 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
         else showToast("Android could not schedule printer keep-awake. Check the diagnostic log.");
     }
 
+    private void attachUsageTracking(Button b) {
+        b.setOnTouchListener((view, event) -> {
+            if (event.getActionMasked() == MotionEvent.ACTION_UP && view.isEnabled()
+                    && event.getX() >= 0 && event.getX() < view.getWidth()
+                    && event.getY() >= 0 && event.getY() < view.getHeight()) {
+                UsageInsights.record(getApplicationContext(), b.getText().toString());
+            }
+            return false;
+        });
+    }
+
     private void applyButtonBackground(Button b, int color, boolean enabled) {
         GradientDrawable gd = new GradientDrawable();
-        gd.setColor(enabled ? color : 0xFF2A2E35);
-        gd.setCornerRadius(dp(10));
+        boolean primary = color == 0xFF2563EB || color == 0xFF19B5A5 || color == 0xFF168F84;
+        gd.setColor(enabled ? (primary ? 0xFF2563EB : 0xFFFFFFFF) : 0xFFE5EAF4);
+        gd.setCornerRadius(dp(11));
+        gd.setStroke(dp(1), enabled ? (primary ? 0xFF2563EB : 0xFFCAD7E9) : 0xFFD2DEED);
+        b.setTextColor(primary && enabled ? Color.WHITE : 0xFF203456);
         b.setBackground(gd);
-        b.setAlpha(enabled ? 1f : 0.48f);
+        b.setAlpha(enabled ? 1f : 0.66f);
     }
 
     private void updateControls() {
@@ -1193,7 +1209,7 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
         if (lockButton != null) lockButton.setText(locked ? "Unlock" : "Lock");
         if (multiButton != null) {
             multiButton.setText(canvasView.isMultiSelectMode() ? "Multi ✓" : "Multi");
-            applyButtonBackground(multiButton, canvasView.isMultiSelectMode() ? 0xFF168F84 : 0xFF343A44, true);
+            applyButtonBackground(multiButton, canvasView.isMultiSelectMode() ? 0xFF168F84 : 0xFFFFFFFF, true);
         }
         setEnabledStyled(bulkButton, canvasView.getSelectionCount() > 0);
         setEnabledStyled(layoutButton, canvasView.getItemCount() > 0);
@@ -1207,7 +1223,7 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
     private void setEnabledStyled(Button b, boolean enabled) {
         if (b == null) return;
         b.setEnabled(enabled);
-        applyButtonBackground(b, 0xFF343A44, enabled);
+        applyButtonBackground(b, 0xFFFFFFFF, enabled);
     }
 
     private void updateStatus() {
@@ -1252,6 +1268,12 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
     @Override public void onConfigurationChanged(Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
         Diagnostics.log("DEVICE_ROTATED", "orientation=" + newConfig.orientation);
+        if (canvasView != null) {
+            String sheet = canvasView.toJson();
+            setContentView(buildUi());
+            canvasView.fromJson(sheet);
+            updateControls();
+        }
     }
 
     @Override protected void onNewIntent(Intent intent) {
