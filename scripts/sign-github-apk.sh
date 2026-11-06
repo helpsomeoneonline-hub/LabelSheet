@@ -26,7 +26,7 @@ for apk in "$@"; do
   fingerprint="$("$signer" verify --print-certs "$work/signed.apk" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | head -n 1)"
   actual="$(printf '%s' "$fingerprint" | tr -d ':[:space:]' | tr '[:lower:]' '[:upper:]')"
   if [[ "$actual" != "$expected" ]]; then
-    echo "::error::APK certificate does not match the pinned fingerprint. Refusing publication: $apk" >&2
+    echo "::error::APK certificate does not match pinned fingerprint. Actual signer certificate SHA-256: ${actual:-unavailable}; pinned certificate SHA-256: $expected. Refusing publication: $apk" >&2
     exit 1
   fi
   "$signer" verify --verbose "$work/signed.apk"
