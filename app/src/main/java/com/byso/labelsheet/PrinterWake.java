@@ -40,6 +40,40 @@ final class PrinterWake {
         return probePrinter(host, 700);
     }
 
+    /** Reconnect in bounded stages; never pretend an open TCP port proves paper was printed. */
+    static Result reconnectForPrint(String preferredHost, boolean aggressive) {
+        long start = android.os.SystemClock.elapsedRealtime();
+        String preferred = normalizeHost(preferredHost);
+        int tries = aggressive ? 3 : 1;
+        for (int i = 0; i < tries && !preferred.isEmpty(); i++) {
+            int port = probePrinter(preferred, aggressive ? 850 : 500);
+            Diagnostics.log("PRINTER_RECONNECT_PROBE", "attempt=" + (i + 1) +
+                    ", service=" + (port > 0 ? port : "unreachable") +
+                    ", elapsed_ms=" + (android.os.SystemClock.elapsedRealtime() - start));
+            if (port > 0) return new Result(preferred, port, false);
+            if (i + 1 < tries) try { Thread.sleep(800L * (i+1)); }
+                    catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                        return null;
+                    }
+        }
+        Result discovered = discover(DEFAULT_PREFIX, DEFAULT_RANGE_START, DEFAULT_RANGE_END, preferred);
+        Diagnostics.log("PRINTER_RECONNECT_SCAN",
+                "found=" + (discovered != null) +
+                ", elapsed_ms=" + (android.os.SystemClock.elapsedRealtime() - start));
+        return discovered;
+    }
+
+    static String serviceDescription(Result r) {
+        if (r == null) return "No network print service responded.";
+        switch (r.port) {
+            case 631: return "IPP network print service responded (port 631).";
+            case 9100: return "Raw print service responded (port 9100).";
+            case 80: return "Printer web interface responded (port 80); print readiness unconfirmed.";
+            default: return "Network connection responded; print readiness unconfirmed.";
+        }
+    }
+
     static Result findAndWake(String preferredHost) {
         String preferred = normalizeHost(preferredHost);
         if (!preferred.isEmpty()) {
