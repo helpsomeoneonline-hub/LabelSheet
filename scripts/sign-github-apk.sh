@@ -23,10 +23,12 @@ for apk in "$@"; do
   if [[ ! -s "$apk" ]]; then echo "::error::Missing APK: $apk" >&2; exit 1; fi
   cp "$apk" "$work/original.apk"
   "$signer" sign --ks "$work/app-signing.jks" --ks-key-alias app --ks-pass env:ANDROID_SIGNING_STORE_PASSWORD --key-pass env:ANDROID_SIGNING_STORE_PASSWORD --out "$work/signed.apk" "$work/original.apk"
-  fingerprint="$("$signer" verify --print-certs "$work/signed.apk" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | head -n 1)"
+  # The output format of apksigner --print-certs varies by SDK.
+  # Read the fingerprint from the very keystore used to sign; then verify the APK signature.
+  fingerprint="$(keytool -list -v -keystore "$work/app-signing.jks" -alias app -storepass:env ANDROID_SIGNING_STORE_PASSWORD | sed -n 's/^[[:space:]]*SHA256:[[:space:]]*//p' | head -n 1)"
   actual="$(printf '%s' "$fingerprint" | tr -d ':[:space:]' | tr '[:lower:]' '[:upper:]')"
   if [[ "$actual" != "$expected" ]]; then
-    echo "::error::APK certificate does not match pinned fingerprint. Actual signer certificate SHA-256: ${actual:-unavailable}; pinned certificate SHA-256: $expected. Refusing publication: $apk" >&2
+    echo "::error::Signing keystore certificate mismatch. Actual SHA-256: ${actual:-unavailable}; pinned SHA-256: $expected. Refusing publication: $apk" >&2
     exit 1
   fi
   "$signer" verify --verbose "$work/signed.apk"
