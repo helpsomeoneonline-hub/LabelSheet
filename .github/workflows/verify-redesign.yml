@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -58,3 +58,17 @@ jobs:
           name: LabelSheet-1.8.0-signed-apk
           path: LabelSheet-1.8.0.apk
           if-no-files-found: error
+
+      - name: Publish direct APK download on GitHub Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          tag="labelsheet-v1.8.0"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$tag" "LabelSheet-1.8.0.apk" --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$tag" "LabelSheet-1.8.0.apk" --repo "$GITHUB_REPOSITORY" \
+              --title "LabelSheet 1.8.0 signed APK" --prerelease --target "$GITHUB_SHA" \
+              --notes "Signed Android APK for LabelSheet 1.8.0. This build uses the newly configured permanent signing certificate. An older installed build signed with a different certificate cannot be updated in place."
+          fi
