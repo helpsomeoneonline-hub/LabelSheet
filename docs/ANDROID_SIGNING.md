@@ -4,6 +4,29 @@ GitHub Actions runners are disposable. Their default debug keystore changes acro
 
 This workflow builds the existing Android variant, then re-signs the final APK with a retained app-specific keystore from encrypted GitHub Actions secrets. It checks the public SHA-256 fingerprint from an Actions variable before allowing the APK artifact to be published.
 
+
+## Phone/tablet-only setup (no Windows computer)
+
+If you do not have access to Windows, a GitHub Codespace opened in a mobile browser can run Java's `keytool`. Use a trusted Codespace that belongs to your own GitHub account and ensure Java is installed.
+
+1. On GitHub in your browser, open **Code → Codespaces → Create codespace** for your repository. Open its terminal.
+2. If you already possess the original private signing keystore, reuse it. Do **not** generate a new one. If you only have an installed APK, its public certificate cannot recreate that key.
+3. For a brand-new key only when a controlled first-time migration is acceptable, run:
+   ```bash
+   keytool -genkeypair -keystore "$HOME/LabelSheet-signing.jks" -storetype PKCS12 -alias app -keyalg RSA -keysize 3072 -validity 10950 -dname "CN=LabelSheet, O=Personal Apps, C=TT"
+   ```
+   Enter a strong password when prompted. Do not put passwords on the command line.
+4. In GitHub repository **Settings → Secrets and variables → Actions**, create secret `ANDROID_SIGNING_KEYSTORE_B64` using the *one-line* output of:
+   ```bash
+   base64 -w 0 "$HOME/LabelSheet-signing.jks"
+   ```
+   Treat that Base64 output as a private secret; do not paste it in an issue, commit, or chat message.
+5. Create secret `ANDROID_SIGNING_STORE_PASSWORD` from the password you set.
+6. Get the public fingerprint using `keytool -list -v -keystore "$HOME/LabelSheet-signing.jks" -alias app` and create variable `ANDROID_SIGNING_CERT_SHA256` using the SHA-256 certificate fingerprint.
+7. Save a secure, private backup of your `.jks` file and its password outside that temporary Codespace. Never delete the sole usable private key. Clear terminal scrollback and any temporary exported Base64 files.
+
+The 1.8 workflow is at `.github/workflows/verify-redesign.yml`. Its compile step can pass without signing secrets, but its release steps fail closed until the three items are set. Compare the current installed app's certificate fingerprint against the private key before expecting an in-place update.
+
 ## One-time setup in this repository
 
 Go to **Settings > Secrets and variables > Actions**.
