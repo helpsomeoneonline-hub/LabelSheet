@@ -1,4 +1,5 @@
 name: Verify and sign LabelSheet 1.8 redesign
+# Re-run the automatic signed build after configuring repository secrets.
 
 on:
   push:
