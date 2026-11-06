@@ -45,6 +45,13 @@ public class LetterCanvasView extends View {
     private Listener listener;
 
     private boolean portrait = true;
+    private float defaultNewImageBorderPt = 0f;
+
+    /** Default border applies only when inserting a new image; existing labels keep their own style. */
+    public void setDefaultNewImageBorder(float points) {
+        defaultNewImageBorderPt = clamp(points, 0f, 24f);
+    }
+
     private int selected = -1;
     private final LinkedHashSet<Integer> selectedSet = new LinkedHashSet<>();
     private boolean multiSelectMode = false;
@@ -231,6 +238,7 @@ public class LetterCanvasView extends View {
             h = clamp(h, 0.08f, 0.65f);
             float offset = Math.min(0.06f * items.size(), 0.24f);
             SheetItem item = new SheetItem(uri.toString(), 0.08f + offset, 0.08f + offset, w, h);
+            item.borderPt = defaultNewImageBorderPt;
             item.x = clamp(item.x, 0f, 1f - item.w);
             item.y = clamp(item.y, 0f, 1f - item.h);
             item.bitmap = bitmap;
