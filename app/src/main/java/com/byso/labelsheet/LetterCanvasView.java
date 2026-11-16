@@ -84,6 +84,48 @@ public class LetterCanvasView extends View {
     private float guideYNorm = 0.5f;
     private final float touchSlop;
 
+    // Side parking area around the page, in page-size units. Pictures parked there are never printed.
+    static final float BOARD_X = 0.85f;
+    static final float BOARD_Y = 0.45f;
+    private static final float MIN_ZOOM = 0.35f;
+    private static final float MAX_ZOOM = 4.0f;
+    private final Paint boardPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint boardEdgePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint captionPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint emptyPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint warnPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint badgePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint badgeTextPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint dimPaint = new Paint();
+
+    private static float minX(SheetItem i) { return -BOARD_X; }
+    private static float maxX(SheetItem i) { return 1f + BOARD_X - i.w; }
+    private static float minY(SheetItem i) { return -BOARD_Y; }
+    private static float maxY(SheetItem i) { return 1f + BOARD_Y - i.h; }
+
+    /** Keeps a picture inside the page + side area (it may sit fully off the page). */
+    private static void clampToBoard(SheetItem i) {
+        i.x = clamp(i.x, minX(i), maxX(i));
+        i.y = clamp(i.y, minY(i), maxY(i));
+    }
+
+    /** Fully inside the printable Letter page. */
+    static boolean isFullyOnPage(SheetItem i) {
+        float e = 0.0005f;
+        return i.x >= -e && i.y >= -e && i.x + i.w <= 1f + e && i.y + i.h <= 1f + e;
+    }
+
+    /** Touches the page at all (will at least partly print). */
+    static boolean touchesPage(SheetItem i) {
+        return i.x < 1f && i.x + i.w > 0f && i.y < 1f && i.y + i.h > 0f;
+    }
+
+    public int getOnPageCount() { int n = 0; for (SheetItem i : items) if (touchesPage(i)) n++; return n; }
+    public int getOffPageCount() { return items.size() - getOnPageCount(); }
+    public int getCrossingEdgeCount() { int n = 0; for (SheetItem i : items) if (touchesPage(i) && !isFullyOnPage(i)) n++; return n; }
+    public boolean isSelectedOffPage() { return hasSelection() && !touchesPage(items.get(selected)); }
+    public boolean isSelectionMultiple() { return selectedSet.size() > 1; }
+
     public LetterCanvasView(Context context) {
         this(context, null);
     }
@@ -109,6 +151,28 @@ public class LetterCanvasView extends View {
         guidePaint.setStrokeWidth(1.3f * getResources().getDisplayMetrics().density);
         guidePaint.setColor(Color.rgb(25, 181, 165));
 
+        float d = getResources().getDisplayMetrics().density;
+        boardPaint.setColor(0xFFEEF2F8);
+        boardEdgePaint.setStyle(Paint.Style.STROKE);
+        boardEdgePaint.setStrokeWidth(1.2f * d);
+        boardEdgePaint.setColor(0xFFC3CEDD);
+        boardEdgePaint.setPathEffect(new DashPathEffect(new float[]{6f * d, 5f * d}, 0f));
+        captionPaint.setColor(0xFF7A8BA3);
+        captionPaint.setTextSize(11.5f * d);
+        captionPaint.setTypeface(android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD));
+        emptyPaint.setColor(0xFF8A9AB0);
+        emptyPaint.setTextSize(15f * d);
+        emptyPaint.setTextAlign(Paint.Align.CENTER);
+        warnPaint.setStyle(Paint.Style.STROKE);
+        warnPaint.setStrokeWidth(2.2f * d);
+        warnPaint.setColor(0xFFF59E0B);
+        warnPaint.setPathEffect(new DashPathEffect(new float[]{7f * d, 4f * d}, 0f));
+        badgePaint.setColor(0xE6334155);
+        badgeTextPaint.setColor(Color.WHITE);
+        badgeTextPaint.setTextSize(10.5f * d);
+        badgeTextPaint.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        dimPaint.setColor(0x33FFFFFF);
+
         scaleDetector = new ScaleGestureDetector(context, new ScaleGestureDetector.SimpleOnScaleGestureListener() {
             @Override public boolean onScaleBegin(ScaleGestureDetector detector) {
                 panningCanvas = false;
@@ -117,7 +181,7 @@ public class LetterCanvasView extends View {
 
             @Override public boolean onScale(ScaleGestureDetector detector) {
                 float oldZoom = zoom;
-                float newZoom = clamp(oldZoom * detector.getScaleFactor(), 0.65f, 4.0f);
+                float newZoom = clamp(oldZoom * detector.getScaleFactor(), MIN_ZOOM, MAX_ZOOM);
                 if (Math.abs(newZoom - oldZoom) < 0.0001f) return true;
                 float cx = getWidth() / 2f + panX;
                 float cy = getHeight() / 2f + panY;
@@ -178,7 +242,7 @@ public class LetterCanvasView extends View {
     public int getZoomPercent() { return Math.round(zoom * 100f); }
 
     public void setZoom(float value) {
-        zoom = clamp(value, 0.65f, 4.0f);
+        zoom = clamp(value, MIN_ZOOM, MAX_ZOOM);
         clampPan();
         invalidate();
         if (listener != null) listener.onSelectionChanged(hasSelection());
@@ -186,10 +250,21 @@ public class LetterCanvasView extends View {
 
     public void zoomBy(float factor) { setZoom(zoom * factor); }
 
+    /** Fits the page, and zooms out just enough to also show any pictures parked beside it. */
     public void fitPage() {
-        zoom = 1f;
-        panX = 0f;
-        panY = 0f;
+        float l = 0f, t = 0f, r = 1f, b = 1f;
+        for (SheetItem i : items) {
+            l = Math.min(l, i.x); t = Math.min(t, i.y);
+            r = Math.max(r, i.x + i.w); b = Math.max(b, i.y + i.h);
+        }
+        float need = Math.max((r - l), (b - t));
+        float baseW = getBasePageWidth(), baseH = getBasePageHeight();
+        float fitW = getWidth() > 0 ? (getWidth() - 24f * getResources().getDisplayMetrics().density) / Math.max(1f, (r - l) * baseW) : 1f;
+        float fitH = getHeight() > 0 ? (getHeight() - 24f * getResources().getDisplayMetrics().density) / Math.max(1f, (b - t) * baseH) : 1f;
+        zoom = need <= 1.0001f ? 1f : clamp(Math.min(1f, Math.min(fitW, fitH)), MIN_ZOOM, 1f);
+        panX = -((l + r) / 2f - 0.5f) * baseW * zoom;
+        panY = -((t + b) / 2f - 0.5f) * baseH * zoom;
+        clampPan();
         invalidate();
         Diagnostics.log("CANVAS_ZOOM", "fit_page");
         if (listener != null) listener.onSelectionChanged(hasSelection());
@@ -215,6 +290,18 @@ public class LetterCanvasView extends View {
 
     public int getItemCount() { return items.size(); }
 
+    public void selectAll() {
+        if (items.isEmpty()) return;
+        multiSelectMode = true;
+        selectedSet.clear();
+        for (int i = 0; i < items.size(); i++) selectedSet.add(i);
+        selected = items.size() - 1;
+        invalidate();
+        if (listener != null) listener.onSelectionChanged(true);
+    }
+
+    public boolean hasBorderOnSelected() { return hasSelection() && items.get(selected).borderPt > 0.01f; }
+
     public void clearSelection() {
         selected = -1;
         selectedSet.clear();
@@ -239,8 +326,8 @@ public class LetterCanvasView extends View {
             float offset = Math.min(0.06f * items.size(), 0.24f);
             SheetItem item = new SheetItem(uri.toString(), 0.08f + offset, 0.08f + offset, w, h);
             item.borderPt = defaultNewImageBorderPt;
-            item.x = clamp(item.x, 0f, 1f - item.w);
-            item.y = clamp(item.y, 0f, 1f - item.h);
+            item.x = clamp(item.x, -BOARD_X, 1f + BOARD_X - item.w);
+            item.y = clamp(item.y, -BOARD_Y, 1f + BOARD_Y - item.h);
             item.bitmap = bitmap;
             items.add(item);
             selected = items.size() - 1;
@@ -282,8 +369,8 @@ public class LetterCanvasView extends View {
         SheetItem original = items.get(selected);
         SheetItem copy = original.copy();
         copy.locked = false;
-        copy.x = clamp(copy.x + 0.035f, 0f, 1f - copy.w);
-        copy.y = clamp(copy.y + 0.035f, 0f, 1f - copy.h);
+        copy.x = clamp(copy.x + 0.035f, -BOARD_X, 1f + BOARD_X - copy.w);
+        copy.y = clamp(copy.y + 0.035f, -BOARD_Y, 1f + BOARD_Y - copy.h);
         items.add(copy);
         selected = items.size() - 1;
         selectedSet.clear();
@@ -292,6 +379,54 @@ public class LetterCanvasView extends View {
         invalidate();
         if (listener != null) listener.onSheetChanged();
         return true;
+    }
+
+    /**
+     * Moves the selected picture(s) into the side area beside the page (not printed),
+     * or, if they are already parked, back onto the page. Returns 1 = parked, 2 = placed on page, 0 = nothing changed.
+     */
+    public int toggleSelectedParking() {
+        if (!hasSelection()) return 0;
+        ArrayList<Integer> targets = new ArrayList<>();
+        if (selectedSet.isEmpty()) targets.add(selected); else targets.addAll(selectedSet);
+        boolean park = touchesPage(items.get(selected));
+        int changed = 0;
+        if (park) {
+            // Stack parked pictures down the right-hand side area, below anything already parked there.
+            float x = 1f + 0.06f;
+            float y = 0f;
+            for (SheetItem it : items) {
+                if (!touchesPage(it) && it.x >= 1f) y = Math.max(y, it.y + it.h + 0.02f);
+            }
+            for (int idx : targets) {
+                if (idx < 0 || idx >= items.size()) continue;
+                SheetItem it = items.get(idx);
+                if (it.locked) continue;
+                float w = Math.min(it.w, BOARD_X - 0.1f);
+                if (w < it.w) { it.h = it.h * (w / it.w); it.w = w; }
+                if (y + it.h > 1f + BOARD_Y) { y = 0f; x = -BOARD_X + 0.04f; }
+                it.x = x; it.y = y;
+                clampToBoard(it);
+                y += it.h + 0.02f;
+                changed++;
+            }
+        } else {
+            float off = 0f;
+            for (int idx : targets) {
+                if (idx < 0 || idx >= items.size()) continue;
+                SheetItem it = items.get(idx);
+                if (it.locked) continue;
+                it.x = clamp(0.5f - it.w / 2f + off, 0f, Math.max(0f, 1f - it.w));
+                it.y = clamp(0.5f - it.h / 2f + off, 0f, Math.max(0f, 1f - it.h));
+                off += 0.03f;
+                changed++;
+            }
+        }
+        if (changed == 0) return 0;
+        Diagnostics.log(park ? "LABEL_PARKED" : "LABEL_UNPARKED", "count=" + changed);
+        invalidate();
+        if (listener != null) { listener.onSelectionChanged(true); listener.onSheetChanged(); }
+        return park ? 1 : 2;
     }
 
     public boolean deleteSelected() {
@@ -319,8 +454,8 @@ public class LetterCanvasView extends View {
         float temp = item.w;
         item.w = clamp(item.h * (portrait ? (11f / 8.5f) : (8.5f / 11f)), 0.05f, 0.95f);
         item.h = clamp(temp * (portrait ? (8.5f / 11f) : (11f / 8.5f)), 0.035f, 0.95f);
-        item.x = clamp(item.x, 0f, 1f - item.w);
-        item.y = clamp(item.y, 0f, 1f - item.h);
+        item.x = clamp(item.x, -BOARD_X, 1f + BOARD_X - item.w);
+        item.y = clamp(item.y, -BOARD_Y, 1f + BOARD_Y - item.h);
         Diagnostics.log("LABEL_ROTATED", "rotation=" + item.rotation);
         invalidate();
         if (listener != null) listener.onSheetChanged();
@@ -414,8 +549,8 @@ public class LetterCanvasView extends View {
             item.cropTop = clamp((float) o.optDouble("cropTop", item.cropTop), 0f, 0.45f);
             item.cropRight = clamp((float) o.optDouble("cropRight", item.cropRight), 0f, 0.45f);
             item.cropBottom = clamp((float) o.optDouble("cropBottom", item.cropBottom), 0f, 0.45f);
-            item.x = clamp(cx - item.w / 2f, 0f, 1f - item.w);
-            item.y = clamp(cy - item.h / 2f, 0f, 1f - item.h);
+            item.x = clamp(cx - item.w / 2f, -BOARD_X, 1f + BOARD_X - item.w);
+            item.y = clamp(cy - item.h / 2f, -BOARD_Y, 1f + BOARD_Y - item.h);
             Diagnostics.log("FORMAT_PASTED", selectedSizeText());
             invalidate();
             if (listener != null) listener.onSheetChanged();
@@ -469,8 +604,8 @@ public class LetterCanvasView extends View {
             float formerW = item.w;
             item.w = clamp(item.h * (portrait ? (11f / 8.5f) : (8.5f / 11f)), 0.05f, 0.95f);
             item.h = clamp(formerW * (portrait ? (8.5f / 11f) : (11f / 8.5f)), 0.035f, 0.95f);
-            item.x = clamp(item.x, 0f, 1f - item.w);
-            item.y = clamp(item.y, 0f, 1f - item.h);
+            item.x = clamp(item.x, -BOARD_X, 1f + BOARD_X - item.w);
+            item.y = clamp(item.y, -BOARD_Y, 1f + BOARD_Y - item.h);
             changed++;
         }
         if (changed > 0) {
@@ -497,8 +632,8 @@ public class LetterCanvasView extends View {
             if (item.locked) continue;
             float cx = item.x + item.w / 2f, cy = item.y + item.h / 2f;
             item.w = newW; item.h = newH;
-            item.x = clamp(cx - newW / 2f, 0f, 1f - newW);
-            item.y = clamp(cy - newH / 2f, 0f, 1f - newH);
+            item.x = clamp(cx - newW / 2f, -BOARD_X, 1f + BOARD_X - newW);
+            item.y = clamp(cy - newH / 2f, -BOARD_Y, 1f + BOARD_Y - newH);
             changed++;
         }
         if (changed > 0) {
@@ -533,8 +668,8 @@ public class LetterCanvasView extends View {
                 if (item.locked) continue;
                 float cx = item.x + item.w / 2f, cy = item.y + item.h / 2f;
                 item.w = w; item.h = h;
-                item.x = clamp(cx - w / 2f, 0f, 1f - w);
-                item.y = clamp(cy - h / 2f, 0f, 1f - h);
+                item.x = clamp(cx - w / 2f, -BOARD_X, 1f + BOARD_X - w);
+                item.y = clamp(cy - h / 2f, -BOARD_Y, 1f + BOARD_Y - h);
                 item.rotation = rot;
                 item.borderPt = border;
                 item.cropLeft = cl; item.cropTop = ct;
@@ -563,8 +698,8 @@ public class LetterCanvasView extends View {
         float newH = clamp(heightIn / pageH, 0.03f, 0.95f);
         float cx = item.x + item.w / 2f, cy = item.y + item.h / 2f;
         item.w = newW; item.h = newH;
-        item.x = clamp(cx - newW / 2f, 0f, 1f - newW);
-        item.y = clamp(cy - newH / 2f, 0f, 1f - newH);
+        item.x = clamp(cx - newW / 2f, -BOARD_X, 1f + BOARD_X - newW);
+        item.y = clamp(cy - newH / 2f, -BOARD_Y, 1f + BOARD_Y - newH);
         Diagnostics.log("EXACT_SIZE_SET", selectedSizeText());
         invalidate(); if (listener != null) listener.onSheetChanged(); return true;
     }
@@ -584,8 +719,8 @@ public class LetterCanvasView extends View {
         for (int i : targets) {
             if (i < 0 || i >= items.size()) continue;
             SheetItem item = items.get(i); if (item.locked) continue;
-            item.x = clamp(item.x + dx, 0f, 1f - item.w);
-            item.y = clamp(item.y + dy, 0f, 1f - item.h);
+            item.x = clamp(item.x + dx, -BOARD_X, 1f + BOARD_X - item.w);
+            item.y = clamp(item.y + dy, -BOARD_Y, 1f + BOARD_Y - item.h);
             changed = true;
         }
         if (changed) { invalidate(); if (listener != null) listener.onSheetChanged(); }
@@ -617,8 +752,8 @@ public class LetterCanvasView extends View {
         for (int n = 0; n < count; n++) {
             SheetItem copy = source.copy(); copy.locked = false;
             float off = 0.025f * (n + 1);
-            copy.x = clamp(source.x + off, 0f, 1f - copy.w);
-            copy.y = clamp(source.y + off, 0f, 1f - copy.h);
+            copy.x = clamp(source.x + off, -BOARD_X, 1f + BOARD_X - copy.w);
+            copy.y = clamp(source.y + off, -BOARD_Y, 1f + BOARD_Y - copy.h);
             items.add(copy); made++;
         }
         selected = items.size() - 1; selectedSet.clear(); selectedSet.add(selected);
@@ -631,13 +766,18 @@ public class LetterCanvasView extends View {
         float gapX = 0.012f, gapY = 0.012f, margin = 0.025f;
         int cols = Math.max(1, (int) Math.floor((1f - margin * 2f + gapX) / (source.w + gapX)));
         int rows = Math.max(1, (int) Math.floor((1f - margin * 2f + gapY) / (source.h + gapY)));
-        items.clear();
+        // Replace what is on the page; pictures parked in the side area stay where they are.
+        for (int i = items.size() - 1; i >= 0; i--) {
+            SheetItem it = items.get(i);
+            if (touchesPage(it) && !it.locked) items.remove(i);
+        }
         for (int r = 0; r < rows; r++) for (int c = 0; c < cols; c++) {
             SheetItem copy = source.copy(); copy.locked = false;
             copy.x = margin + c * (source.w + gapX); copy.y = margin + r * (source.h + gapY);
             if (copy.x + copy.w <= 1f - margin + 0.001f && copy.y + copy.h <= 1f - margin + 0.001f) items.add(copy);
         }
-        selected = items.isEmpty() ? -1 : 0; selectedSet.clear(); if (selected >= 0) selectedSet.add(selected);
+        selected = -1; selectedSet.clear();
+        if (listener != null) listener.onSelectionChanged(false);
         Diagnostics.log("FILL_SHEET", "labels=" + items.size()); invalidate(); if (listener != null) listener.onSheetChanged(); return true;
     }
 
@@ -650,7 +790,7 @@ public class LetterCanvasView extends View {
         for (SheetItem i:list) {
             if ("left".equals(mode)) i.x=left; else if ("right".equals(mode)) i.x=right-i.w; else if ("center".equals(mode)) i.x=cx-i.w/2f;
             else if ("top".equals(mode)) i.y=top; else if ("bottom".equals(mode)) i.y=bottom-i.h; else if ("middle".equals(mode)) i.y=cy-i.h/2f;
-            i.x=clamp(i.x,0f,1f-i.w); i.y=clamp(i.y,0f,1f-i.h);
+            clampToBoard(i);
         }
         Diagnostics.log("ALIGN_SELECTED", mode + ", count=" + list.size()); invalidate(); if (listener != null) listener.onSheetChanged(); return true;
     }
@@ -677,7 +817,10 @@ public class LetterCanvasView extends View {
     }
 
     public void autoArrange() {
-        int n = items.size();
+        // Only pictures touching the page are arranged; parked and locked pictures are left alone.
+        ArrayList<SheetItem> targets = new ArrayList<>();
+        for (SheetItem it : items) if (touchesPage(it) && !it.locked) targets.add(it);
+        int n = targets.size();
         if (n == 0) return;
         int cols = n <= 2 ? 1 : (n <= 8 ? 2 : 3);
         int rows = (int) Math.ceil(n / (double) cols);
@@ -688,7 +831,7 @@ public class LetterCanvasView extends View {
         float pageAspect = portrait ? (8.5f / 11f) : (11f / 8.5f);
 
         for (int i = 0; i < n; i++) {
-            SheetItem item = items.get(i);
+            SheetItem item = targets.get(i);
             int col = i % cols;
             int row = i / cols;
             float imageAspect = 1f;
@@ -740,7 +883,8 @@ public class LetterCanvasView extends View {
         SheetItem item = items.get(selected);
         float pageW = portrait ? 8.5f : 11f;
         float pageH = portrait ? 11f : 8.5f;
-        return String.format(java.util.Locale.US, "Selected: %.2f × %.2f in%s", item.w * pageW, item.h * pageH, item.locked ? " • Locked" : "");
+        String where = !touchesPage(item) ? " • off page (won't print)" : (!isFullyOnPage(item) ? " • crosses page edge" : "");
+        return String.format(java.util.Locale.US, "%.2f × %.2f in%s%s", item.w * pageW, item.h * pageH, item.locked ? " • Locked" : "", where);
     }
 
     public String toJson() {
@@ -786,10 +930,13 @@ public class LetterCanvasView extends View {
         Paint white = new Paint(Paint.ANTI_ALIAS_FLAG);
         white.setColor(Color.WHITE);
         canvas.drawRect(target, white);
+        canvas.save();
+        canvas.clipRect(target);
         for (SheetItem item : items) {
-            if (item.bitmap == null) continue;
+            if (item.bitmap == null || !touchesPage(item)) continue; // side-area pictures are never printed
             drawItem(canvas, item, target, false, false);
         }
+        canvas.restore();
     }
 
     @Override protected void onDraw(Canvas canvas) {
@@ -802,6 +949,22 @@ public class LetterCanvasView extends View {
         float left = (getWidth() - pw) / 2f + panX;
         float top = (getHeight() - ph) / 2f + panY;
         pageRect.set(left, top, left + pw, top + ph);
+
+        // Side parking area: everything here stays on screen but is never printed.
+        float d = getResources().getDisplayMetrics().density;
+        RectF board = new RectF(pageRect.left - BOARD_X * pw, pageRect.top - BOARD_Y * ph,
+                pageRect.right + BOARD_X * pw, pageRect.bottom + BOARD_Y * ph);
+        canvas.drawRoundRect(board, 14f * d, 14f * d, boardPaint);
+        canvas.drawRoundRect(board, 14f * d, 14f * d, boardEdgePaint);
+        String cap = "SIDE AREA • NOT PRINTED";
+        float capW = captionPaint.measureText(cap);
+        float visibleRight = Math.min(board.right, getWidth());
+        if (visibleRight - pageRect.right >= capW + 28f * d) {
+            canvas.drawText(cap, pageRect.right + 14f * d, Math.max(board.top, 0f) + 22f * d, captionPaint);
+        } else if (Math.min(board.bottom, getHeight()) - pageRect.bottom >= 30f * d) {
+            canvas.drawText(cap, pageRect.left, pageRect.bottom + 22f * d, captionPaint);
+        }
+
         canvas.drawRect(pageRect, pagePaint);
 
         float safeX = pageRect.width() * (0.25f / (portrait ? 8.5f : 11f));
@@ -815,6 +978,30 @@ public class LetterCanvasView extends View {
             if (item.bitmap == null) continue;
             boolean selectedState = selectedSet.contains(i) || i == selected;
             drawItem(canvas, item, pageRect, selectedState, i == selected && !item.locked);
+            RectF r = itemRect(item, pageRect);
+            if (!touchesPage(item)) {
+                // Parked: veil + "Not printed" tag so it is obvious at a glance.
+                canvas.save();
+                canvas.rotate(item.rotation, r.centerX(), r.centerY());
+                canvas.drawRect(r, dimPaint);
+                canvas.restore();
+                drawBadge(canvas, "NOT PRINTED", r.left, r.top);
+            } else if (!isFullyOnPage(item)) {
+                canvas.save();
+                canvas.rotate(item.rotation, r.centerX(), r.centerY());
+                canvas.drawRect(r, warnPaint);
+                canvas.restore();
+                drawBadge(canvas, "EDGE CUT OFF", r.left, r.top);
+            }
+            if (item.locked) drawBadge(canvas, "LOCKED", r.left, r.bottom - 20f * d);
+        }
+
+        if (items.isEmpty()) {
+            float cy = pageRect.centerY();
+            canvas.drawText("Your page is empty", pageRect.centerX(), cy - 6f * d, emptyPaint);
+            Paint small = new Paint(emptyPaint);
+            small.setTextSize(12.5f * d);
+            canvas.drawText("Tap Add to place label pictures", pageRect.centerX(), cy + 16f * d, small);
         }
 
         if (showGuideX) {
@@ -880,6 +1067,14 @@ public class LetterCanvasView extends View {
         canvas.restore();
     }
 
+    private void drawBadge(Canvas canvas, String text, float x, float y) {
+        float d = getResources().getDisplayMetrics().density;
+        float tw = badgeTextPaint.measureText(text);
+        RectF b = new RectF(x + 4f * d, y + 4f * d, x + 4f * d + tw + 12f * d, y + 20f * d);
+        canvas.drawRoundRect(b, 8f * d, 8f * d, badgePaint);
+        canvas.drawText(text, b.left + 6f * d, b.bottom - 4.5f * d, badgeTextPaint);
+    }
+
     private float getBasePageWidth() {
         float padding = 20f * getResources().getDisplayMetrics().density;
         float availW = Math.max(1f, getWidth() - padding * 2f);
@@ -899,12 +1094,20 @@ public class LetterCanvasView extends View {
 
     private void clampPan() {
         float baseW = getBasePageWidth(), baseH = getBasePageHeight();
-        float scaledW = baseW * zoom, scaledH = baseH * zoom;
-        float maxX = Math.max(0f, (scaledW - getWidth()) / 2f + 24f * getResources().getDisplayMetrics().density);
-        float maxY = Math.max(0f, (scaledH - getHeight()) / 2f + 24f * getResources().getDisplayMetrics().density);
+        // Content = page plus the side area, so parked pictures can always be scrolled into view.
+        float contentW = baseW * zoom * (1f + 2f * BOARD_X);
+        float contentH = baseH * zoom * (1f + 2f * BOARD_Y);
+        float m = 12f * getResources().getDisplayMetrics().density;
+        float maxX = Math.max(0f, (contentW - getWidth()) / 2f + m);
+        float maxY = Math.max(0f, (contentH - getHeight()) / 2f + m);
         panX = clamp(panX, -maxX, maxX);
         panY = clamp(panY, -maxY, maxY);
-        if (zoom <= 1.001f) { panX = 0f; panY = 0f; }
+    }
+
+    private boolean canPan() {
+        float baseW = getBasePageWidth(), baseH = getBasePageHeight();
+        return baseW * zoom * (1f + 2f * BOARD_X) > getWidth() + 1f
+                || baseH * zoom * (1f + 2f * BOARD_Y) > getHeight() + 1f;
     }
 
     private RectF itemRect(SheetItem item, RectF page) {
@@ -934,7 +1137,7 @@ public class LetterCanvasView extends View {
                         if (!selectedSet.contains(hit)) selectedSet.add(hit);
                         selected = hit;
                     } else {
-                        if (zoom > 1.001f) {
+                        if (canPan()) {
                             panningCanvas = true;
                             panStartX = panX;
                             panStartY = panY;
@@ -949,7 +1152,7 @@ public class LetterCanvasView extends View {
                     } else if (hit >= 0 && selectedSet.isEmpty()) {
                         selectedSet.add(hit);
                     }
-                    if (hit < 0 && zoom > 1.001f) {
+                    if (hit < 0 && canPan()) {
                         panningCanvas = true;
                         panStartX = panX;
                         panStartY = panY;
@@ -1001,8 +1204,8 @@ public class LetterCanvasView extends View {
                     } else if (selectedSet.size() > 1) {
                         moveSelectedGroup(dx / pageRect.width(), dy / pageRect.height());
                     } else {
-                        primary.x = clamp(startItemX + dx / pageRect.width(), 0f, 1f - primary.w);
-                        primary.y = clamp(startItemY + dy / pageRect.height(), 0f, 1f - primary.h);
+                        primary.x = clamp(startItemX + dx / pageRect.width(), -BOARD_X, 1f + BOARD_X - primary.w);
+                        primary.y = clamp(startItemY + dy / pageRect.height(), -BOARD_Y, 1f + BOARD_Y - primary.h);
                         applySnap(primary);
                     }
                     invalidate();
@@ -1047,10 +1250,10 @@ public class LetterCanvasView extends View {
             SheetItem item = items.get(idx);
             if (item.locked) continue;
             float sx = groupStartX.get(idx), sy = groupStartY.get(idx);
-            minDx = Math.max(minDx, -sx);
-            maxDx = Math.min(maxDx, 1f - item.w - sx);
-            minDy = Math.max(minDy, -sy);
-            maxDy = Math.min(maxDy, 1f - item.h - sy);
+            minDx = Math.max(minDx, minX(item) - sx);
+            maxDx = Math.min(maxDx, maxX(item) - sx);
+            minDy = Math.max(minDy, minY(item) - sy);
+            maxDy = Math.min(maxDy, maxY(item) - sy);
         }
         dx = clamp(dx, minDx, maxDx); dy = clamp(dy, minDy, maxDy);
         for (int idx : selectedSet) {
@@ -1067,8 +1270,8 @@ public class LetterCanvasView extends View {
                 for (int idx : selectedSet) {
                     if (idx == selected || idx < 0 || idx >= items.size()) continue;
                     SheetItem item = items.get(idx); if (item.locked) continue;
-                    item.x = clamp(item.x + snapDx, 0f, 1f - item.w);
-                    item.y = clamp(item.y + snapDy, 0f, 1f - item.h);
+                    item.x = clamp(item.x + snapDx, -BOARD_X, 1f + BOARD_X - item.w);
+                    item.y = clamp(item.y + snapDy, -BOARD_Y, 1f + BOARD_Y - item.h);
                 }
             }
         }
@@ -1101,10 +1304,10 @@ public class LetterCanvasView extends View {
         if (resizeHandle == HANDLE_TOP) top += dy;
         if (resizeHandle == HANDLE_BOTTOM) bottom += dy;
 
-        left = clamp(left, 0f, 1f);
-        right = clamp(right, 0f, 1f);
-        top = clamp(top, 0f, 1f);
-        bottom = clamp(bottom, 0f, 1f);
+        left = clamp(left, -BOARD_X, 1f + BOARD_X);
+        right = clamp(right, -BOARD_X, 1f + BOARD_X);
+        top = clamp(top, -BOARD_Y, 1f + BOARD_Y);
+        bottom = clamp(bottom, -BOARD_Y, 1f + BOARD_Y);
 
         if (right - left < minW) {
             if (resizeHandle == HANDLE_LEFT) left = right - minW;
@@ -1115,10 +1318,10 @@ public class LetterCanvasView extends View {
             else bottom = top + minH;
         }
 
-        left = clamp(left, 0f, 1f - minW);
-        right = clamp(right, left + minW, 1f);
-        top = clamp(top, 0f, 1f - minH);
-        bottom = clamp(bottom, top + minH, 1f);
+        left = clamp(left, -BOARD_X, 1f + BOARD_X - minW);
+        right = clamp(right, left + minW, 1f + BOARD_X);
+        top = clamp(top, -BOARD_Y, 1f + BOARD_Y - minH);
+        bottom = clamp(bottom, top + minH, 1f + BOARD_Y);
         item.x = left;
         item.y = top;
         item.w = right - left;
@@ -1146,18 +1349,19 @@ public class LetterCanvasView extends View {
         float maxScaleX;
         float maxScaleY;
 
+        final float bl = -BOARD_X, bt = -BOARD_Y, br = 1f + BOARD_X, bb = 1f + BOARD_Y;
         if (resizeHandle == HANDLE_TL) {
             anchorX = startItemX + startItemW; anchorY = startItemY + startItemH;
-            maxScaleX = anchorX / startItemW; maxScaleY = anchorY / startItemH;
+            maxScaleX = (anchorX - bl) / startItemW; maxScaleY = (anchorY - bt) / startItemH;
         } else if (resizeHandle == HANDLE_TR) {
             anchorX = startItemX; anchorY = startItemY + startItemH;
-            maxScaleX = (1f - anchorX) / startItemW; maxScaleY = anchorY / startItemH;
+            maxScaleX = (br - anchorX) / startItemW; maxScaleY = (anchorY - bt) / startItemH;
         } else if (resizeHandle == HANDLE_BL) {
             anchorX = startItemX + startItemW; anchorY = startItemY;
-            maxScaleX = anchorX / startItemW; maxScaleY = (1f - anchorY) / startItemH;
+            maxScaleX = (anchorX - bl) / startItemW; maxScaleY = (bb - anchorY) / startItemH;
         } else {
             anchorX = startItemX; anchorY = startItemY;
-            maxScaleX = (1f - anchorX) / startItemW; maxScaleY = (1f - anchorY) / startItemH;
+            maxScaleX = (br - anchorX) / startItemW; maxScaleY = (bb - anchorY) / startItemH;
         }
         float maxScale = Math.max(minScale, Math.min(maxScaleX, maxScaleY));
         scale = clamp(scale, minScale, maxScale);
@@ -1260,12 +1464,12 @@ public class LetterCanvasView extends View {
         }
 
         if (bestDx <= thresholdX) {
-            item.x = clamp(bestTargetX - bestOffsetX, 0f, 1f - item.w);
+            item.x = clamp(bestTargetX - bestOffsetX, -BOARD_X, 1f + BOARD_X - item.w);
             guideXNorm = bestTargetX;
             showGuideX = true;
         }
         if (bestDy <= thresholdY) {
-            item.y = clamp(bestTargetY - bestOffsetY, 0f, 1f - item.h);
+            item.y = clamp(bestTargetY - bestOffsetY, -BOARD_Y, 1f + BOARD_Y - item.h);
             guideYNorm = bestTargetY;
             showGuideY = true;
         }

@@ -10,38 +10,44 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.res.ColorStateList;
 import android.content.res.Configuration;
-import android.graphics.Canvas;
 import android.graphics.Color;
-import android.graphics.Paint;
 import android.graphics.RectF;
+import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.RippleDrawable;
 import android.graphics.pdf.PdfDocument;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.CancellationSignal;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.ParcelFileDescriptor;
 import android.print.PageRange;
 import android.print.PrintAttributes;
 import android.print.PrintDocumentAdapter;
 import android.print.PrintDocumentInfo;
 import android.print.PrintManager;
-import android.provider.Settings;
 import android.provider.MediaStore;
-import android.view.Gravity;
-import android.view.WindowInsets;
-import android.view.View;
-import android.view.MotionEvent;
-import android.widget.Button;
-import android.widget.FrameLayout;
-import android.widget.CheckBox;
-import android.widget.HorizontalScrollView;
-import android.widget.EditText;
-import android.widget.SeekBar;
+import android.text.Editable;
 import android.text.InputType;
+import android.text.TextWatcher;
+import android.view.Gravity;
+import android.view.Menu;
+import android.view.SubMenu;
+import android.view.View;
+import android.widget.Button;
+import android.widget.CheckBox;
+import android.widget.EditText;
+import android.widget.FrameLayout;
+import android.widget.HorizontalScrollView;
+import android.widget.ImageButton;
 import android.widget.LinearLayout;
 import android.widget.PopupMenu;
+import android.widget.ScrollView;
+import android.widget.SeekBar;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -49,32 +55,43 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.util.ArrayDeque;
-import java.util.UUID;
 import java.util.Deque;
+import java.util.UUID;
 
+/**
+ * LabelSheet 1.9 — canvas-first editor.
+ * Phones (portrait): top bar + page + one row of tools along the bottom.
+ * Tablets and landscape: top bar + tool rail on the left + page.
+ * Tools change with what is selected, so only relevant buttons are shown.
+ */
 public class MainActivity extends Activity implements LetterCanvasView.Listener {
     private static final int REQ_ADD = 1001;
     private static final int REQ_REPLACE = 1002;
     private static final int REQ_EXPORT_PDF = 1003;
     private static final int REQ_EXPORT_LOG = 1004;
-    private static final int REQ_CROP = 1005;
     private static final int PRINTER_KEEPALIVE_JOB_ID = 12015;
     private static final String DEFAULT_PRINTER_NAME = "Canon TS6500 series";
     private static final String DEFAULT_PRINTER_HOST = "192.168.58.100";
     private static final int DEFAULT_KEEPALIVE_MINUTES = 180;
 
     private LetterCanvasView canvasView;
-    private TextView statusText;
-    private Button addButton, replaceButton, duplicateButton, deleteButton, rotateButton, undoButton, redoButton, cropButton, borderButton;
-    private Button arrangeButton, pageButton, moreButton, copyFormatButton, pasteFormatButton, lockButton, multiButton, layoutButton, zoomPercentButton, bulkButton;
+    private FrameLayout canvasHost;
+    private LinearLayout tools;
+    private boolean railLayout;
+    private TextView subtitle;
+    private ImageButton undoButton, redoButton;
+    private TextView zoomLabel;
+    private View cropOverlay;
+    private Runnable cropCancel;
+    private View undoBar;
+    private String toolsKey = "";
+    private View lastTile;
     private String copiedFormatJson = null;
     private final Deque<String> undo = new ArrayDeque<>();
     private final Deque<String> redo = new ArrayDeque<>();
     private boolean restoringHistory = false;
     private volatile boolean printPreparing = false;
-    private QuickActionsBar quickBar;
-    private FrameLayout canvasHost;
-    private View cropOverlay;
+    private final Handler ui = new Handler(Looper.getMainLooper());
 
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -86,471 +103,835 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
         String saved = SheetStore.load(this);
         if (saved != null) canvasView.fromJson(saved);
         updateControls();
-        updateStatus();
         handleIncomingShare(getIntent());
     }
 
+    // ───────────────────────────── Layout ─────────────────────────────
+
     private View buildUi() {
-        boolean landscapeUi = getResources().getConfiguration().orientation == Configuration.ORIENTATION_LANDSCAPE;
+        Configuration cfg = getResources().getConfiguration();
+        railLayout = cfg.orientation == Configuration.ORIENTATION_LANDSCAPE || cfg.smallestScreenWidthDp >= 600;
+        toolsKey = "";
+
         LinearLayout root = new LinearLayout(this);
-        root.setOrientation(landscapeUi ? LinearLayout.HORIZONTAL : LinearLayout.VERTICAL);
-        root.setBackgroundColor(0xFFF2F6FC);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setBackgroundColor(Theme.BACKGROUND);
         root.setOnApplyWindowInsetsListener((v, insets) -> {
-            int top = insets.getSystemWindowInsetTop();
-            int bottom = insets.getSystemWindowInsetBottom();
-            int left = insets.getSystemWindowInsetLeft();
-            int right = insets.getSystemWindowInsetRight();
-            v.setPadding(left, top + dp(3), right, bottom);
+            v.setPadding(insets.getSystemWindowInsetLeft(), insets.getSystemWindowInsetTop(),
+                    insets.getSystemWindowInsetRight(), insets.getSystemWindowInsetBottom());
             return insets;
         });
         root.requestApplyInsets();
 
-        createActionButtons();
         canvasView = new LetterCanvasView(this);
+        canvasView.setBackgroundColor(Theme.WORKSPACE);
         canvasView.setDefaultNewImageBorder(getSharedPreferences("editor", MODE_PRIVATE)
                 .getBoolean("auto_border", true) ? 2f : 0f);
         canvasView.setListener(this);
         canvasHost = new FrameLayout(this);
-        canvasHost.addView(canvasView, new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
-        quickBar = new QuickActionsBar(this, shortcutSources(), this::printSheet, this::showBorderDialog);
-        statusText = new TextView(this);
-        statusText.setTextColor(0xFF40526F);
-        statusText.setBackgroundColor(0xFFFFFFFF);
-        statusText.setTextSize(11);
-        statusText.setPadding(dp(10), dp(7), dp(10), dp(7));
+        canvasHost.addView(canvasView, new FrameLayout.LayoutParams(-1, -1));
+        canvasHost.addView(buildZoomPill(), zoomPillParams());
 
-        if (landscapeUi) buildLandscapeUi(root);
-        else buildPortraitUi(root);
+        root.addView(buildTopBar(), new LinearLayout.LayoutParams(-1, dp(60)));
+        root.addView(divider(true));
+
+        tools = new LinearLayout(this);
+        if (railLayout) {
+            LinearLayout body = new LinearLayout(this);
+            body.setOrientation(LinearLayout.HORIZONTAL);
+            tools.setOrientation(LinearLayout.VERTICAL);
+            tools.setPadding(dp(6), dp(8), dp(6), dp(8));
+            ScrollView rail = new ScrollView(this);
+            rail.setBackgroundColor(Theme.SURFACE);
+            rail.setVerticalScrollBarEnabled(false);
+            rail.addView(tools, new FrameLayout.LayoutParams(-1, -2));
+            body.addView(rail, new LinearLayout.LayoutParams(dp(cfg.smallestScreenWidthDp >= 600 ? 96 : 88), -1));
+            body.addView(divider(false));
+            body.addView(canvasHost, new LinearLayout.LayoutParams(0, -1, 1f));
+            root.addView(body, new LinearLayout.LayoutParams(-1, 0, 1f));
+        } else {
+            root.addView(canvasHost, new LinearLayout.LayoutParams(-1, 0, 1f));
+            root.addView(divider(true));
+            tools.setOrientation(LinearLayout.HORIZONTAL);
+            tools.setPadding(dp(4), dp(4), dp(4), dp(4));
+            HorizontalScrollView bar = new HorizontalScrollView(this);
+            bar.setBackgroundColor(Theme.SURFACE);
+            bar.setHorizontalScrollBarEnabled(false);
+            bar.setFillViewport(true);
+            bar.addView(tools, new FrameLayout.LayoutParams(-2, -1));
+            root.addView(bar, new LinearLayout.LayoutParams(-1, dp(76)));
+        }
         return root;
     }
 
-    private void createActionButtons() {
-        addButton = makeCompactButton("+ Add", true);
-        addButton.setOnClickListener(v -> chooseImage(false));
+    private View buildTopBar() {
+        LinearLayout bar = new LinearLayout(this);
+        bar.setOrientation(LinearLayout.HORIZONTAL);
+        bar.setGravity(Gravity.CENTER_VERTICAL);
+        bar.setBackgroundColor(Theme.SURFACE);
+        bar.setPadding(dp(16), 0, dp(10), 0);
 
-        cropButton = makeCompactButton("Crop", false);
-        cropButton.setOnClickListener(v -> showInlineCrop());
-
-        borderButton = makeCompactButton("Border", false);
-        borderButton.setOnClickListener(v -> applyQuickBorder());
-        borderButton.setOnLongClickListener(v -> { showBorderDialog(); return true; });
-
-        rotateButton = makeCompactButton("Rotate", false);
-        rotateButton.setOnClickListener(v -> { pushUndo(); if (canvasView.rotateSelected()) redo.clear(); else undo.pollFirst(); updateControls(); });
-
-        duplicateButton = makeCompactButton("Duplicate", false);
-        duplicateButton.setOnClickListener(v -> { pushUndo(); if (canvasView.duplicateSelected()) redo.clear(); else undo.pollFirst(); updateControls(); });
-
-        deleteButton = makeCompactButton("Delete", false);
-        deleteButton.setOnClickListener(v -> { pushUndo(); if (canvasView.deleteSelected()) redo.clear(); else undo.pollFirst(); updateControls(); });
-
-        replaceButton = makeCompactButton("Replace", false);
-        replaceButton.setOnClickListener(v -> chooseImage(true));
-
-        undoButton = makeCompactButton("Undo", false);
-        undoButton.setOnClickListener(v -> undo());
-        redoButton = makeCompactButton("Redo", false);
-        redoButton.setOnClickListener(v -> redo());
-
-        arrangeButton = makeCompactButton("Arrange", false);
-        arrangeButton.setOnClickListener(v -> { if (canvasView.getItemCount() > 0) { pushUndo(); canvasView.autoArrange(); redo.clear(); updateControls(); } });
-
-        pageButton = makeCompactButton("Page ↻", false);
-        pageButton.setOnClickListener(v -> { pushUndo(); canvasView.toggleOrientation(); redo.clear(); canvasView.fitPage(); updateStatus(); });
-
-        copyFormatButton = makeCompactButton("Copy Fmt", false);
-        copyFormatButton.setOnClickListener(v -> copyFormat());
-        pasteFormatButton = makeCompactButton("Paste Fmt", false);
-        pasteFormatButton.setOnClickListener(v -> pasteFormat());
-
-        lockButton = makeCompactButton("Lock", false);
-        lockButton.setOnClickListener(v -> toggleLock());
-        multiButton = makeCompactButton("Multi", false);
-        multiButton.setOnClickListener(v -> toggleMultiSelect());
-
-        layoutButton = makeCompactButton("Layout", false);
-        layoutButton.setOnClickListener(v -> showLayoutTools());
-        moreButton = makeCompactButton("More", false);
-        moreButton.setOnClickListener(this::showMoreMenu);
-        bulkButton = makeCompactButton("Edit All", true);
-        bulkButton.setOnClickListener(v -> showBulkTools());
-    }
-
-    private LinearLayout titleStack(boolean compact) {
-        LinearLayout stack = new LinearLayout(this);
-        stack.setOrientation(LinearLayout.VERTICAL);
-        stack.setPadding(compact ? dp(8) : dp(16), compact ? dp(3) : dp(8), dp(8), compact ? dp(3) : dp(5));
+        LinearLayout titles = new LinearLayout(this);
+        titles.setOrientation(LinearLayout.VERTICAL);
         TextView title = new TextView(this);
-        title.setText("✦ LabelSheet"); title.setTextColor(0xFF203456); title.setTextSize(compact ? 18 : 22);
-        title.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
-        TextView sub = new TextView(this);
-        sub.setText("Label Studio • 8.5 × 11 in"); sub.setTextColor(0xFF627897); sub.setTextSize(compact ? 10 : 12);
-        stack.addView(title); stack.addView(sub); return stack;
+        title.setText("LabelSheet");
+        title.setTextColor(Theme.TEXT);
+        title.setTextSize(19);
+        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
+        subtitle = new TextView(this);
+        subtitle.setTextColor(Theme.TEXT_SOFT);
+        subtitle.setTextSize(12);
+        subtitle.setSingleLine(true);
+        subtitle.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        titles.addView(title);
+        titles.addView(subtitle);
+        bar.addView(titles, new LinearLayout.LayoutParams(0, -2, 1f));
+
+        undoButton = iconButton(R.drawable.ic_undo, "Undo", v -> undo());
+        redoButton = iconButton(R.drawable.ic_redo, "Redo", v -> redo());
+        ImageButton overflow = iconButton(R.drawable.ic_more_vert, "More options", this::showOverflowMenu);
+        bar.addView(undoButton);
+        bar.addView(redoButton);
+        bar.addView(overflow);
+
+        Button print = new Button(this);
+        print.setText("Print");
+        print.setCompoundDrawablePadding(dp(8));
+        print.setAllCaps(false);
+        print.setTextSize(15);
+        print.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        print.setTextColor(Color.WHITE);
+        android.graphics.drawable.Drawable pi = getDrawable(R.drawable.ic_print).mutate();
+        pi.setTint(Color.WHITE);
+        pi.setBounds(0, 0, dp(20), dp(20));
+        print.setCompoundDrawables(pi, null, null, null);
+        print.setPadding(dp(16), 0, dp(18), 0);
+        print.setMinHeight(0); print.setMinimumHeight(0); print.setMinWidth(0); print.setMinimumWidth(0);
+        print.setStateListAnimator(null);
+        print.setBackground(pill(Theme.PRIMARY, 0, 24));
+        print.setContentDescription("Print sheet. Long-press for printer settings.");
+        print.setOnClickListener(v -> { UsageInsights.record(this, "Print"); printSheet(); });
+        print.setOnLongClickListener(v -> { showPrinterSettingsDialog(); return true; });
+        LinearLayout.LayoutParams pp = new LinearLayout.LayoutParams(-2, dp(44));
+        pp.leftMargin = dp(6);
+        bar.addView(print, pp);
+        return bar;
     }
 
-    private Button makeWakeButton() {
-        Button b = makeButton("Wake", false);
-        b.setOnClickListener(v -> wakePrinter());
-        b.setOnLongClickListener(v -> { showPrinterSettingsDialog(false); return true; });
-        return b;
+    private View buildZoomPill() {
+        LinearLayout pill = new LinearLayout(this);
+        pill.setOrientation(LinearLayout.HORIZONTAL);
+        pill.setGravity(Gravity.CENTER_VERTICAL);
+        pill.setBackground(pill(Theme.SURFACE, Theme.OUTLINE, 22));
+        pill.setElevation(dp(3));
+        TextView minus = zoomText("−", "Zoom out");
+        minus.setOnClickListener(v -> canvasView.zoomBy(0.8f));
+        zoomLabel = zoomText("100%", "Fit page and side area. Long-press to zoom to the selected picture.");
+        zoomLabel.setTextSize(13);
+        zoomLabel.setMinWidth(dp(58));
+        zoomLabel.setOnClickListener(v -> canvasView.fitPage());
+        zoomLabel.setOnLongClickListener(v -> { if (!canvasView.fitSelection()) showToast("Select a picture first."); return true; });
+        TextView plus = zoomText("+", "Zoom in");
+        plus.setOnClickListener(v -> canvasView.zoomBy(1.25f));
+        pill.addView(minus, new LinearLayout.LayoutParams(dp(44), dp(44)));
+        pill.addView(zoomLabel, new LinearLayout.LayoutParams(-2, dp(44)));
+        pill.addView(plus, new LinearLayout.LayoutParams(dp(44), dp(44)));
+        return pill;
     }
 
-    private Button makePrintButton() {
-        Button b = makeButton("Print", true); b.setOnClickListener(v -> printSheet()); return b;
+    private FrameLayout.LayoutParams zoomPillParams() {
+        FrameLayout.LayoutParams p = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.END);
+        p.setMargins(0, dp(10), dp(10), 0);
+        return p;
     }
 
-    private void buildPortraitUi(LinearLayout root) {
-        LinearLayout titleBar = new LinearLayout(this);
-        titleBar.setOrientation(LinearLayout.HORIZONTAL); titleBar.setGravity(Gravity.CENTER_VERTICAL);
-        titleBar.addView(titleStack(false), new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
-        titleBar.addView(makeWakeButton()); titleBar.addView(makePrintButton());
-        root.addView(titleBar);
-
-        LinearLayout row1 = toolRow(); addToRow(row1, addButton, cropButton, borderButton, rotateButton, duplicateButton, deleteButton); root.addView(row1, rowParams(48));
-        LinearLayout row2 = toolRow(); addToRow(row2, replaceButton, undoButton, redoButton, arrangeButton, pageButton, moreButton); root.addView(row2, rowParams(48));
-        LinearLayout row3 = toolRow(); addToRow(row3, copyFormatButton, pasteFormatButton, lockButton, multiButton, layoutButton, bulkButton); root.addView(row3, rowParams(48));
-        root.addView(makeZoomRow(), rowParams(40));
-        root.addView(quickBar, rowParams(55));
-
-        TextView hint = new TextView(this);
-        hint.setText("Corners = proportional resize • side handles = width/height • pinch = canvas zoom");
-        hint.setTextColor(0xFF5F728C); hint.setTextSize(11); hint.setGravity(Gravity.CENTER); hint.setPadding(dp(8), 0, dp(8), dp(4));
-        root.addView(hint);
-        root.addView(canvasHost, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
-        root.addView(statusText);
+    private TextView zoomText(String s, String description) {
+        TextView t = new TextView(this);
+        t.setText(s);
+        t.setGravity(Gravity.CENTER);
+        t.setTextColor(Theme.TEXT);
+        t.setTextSize(20);
+        t.setContentDescription(description);
+        t.setBackground(ripple(22));
+        t.setClickable(true);
+        return t;
     }
 
-    private void buildLandscapeUi(LinearLayout root) {
-        LinearLayout left = new LinearLayout(this);
-        left.setOrientation(LinearLayout.VERTICAL); left.setBackgroundColor(0xFFFFFFFF); left.setPadding(dp(5), dp(2), dp(5), dp(2));
-        left.addView(titleStack(true));
-        LinearLayout printRow = toolRow(); addToRow(printRow, makeWakeButton(), makePrintButton()); left.addView(printRow, rowParams(48));
-        addPair(left, addButton, cropButton); addPair(left, borderButton, rotateButton); addPair(left, duplicateButton, deleteButton);
-        addPair(left, replaceButton, arrangeButton); addPair(left, copyFormatButton, pasteFormatButton); addPair(left, lockButton, multiButton);
-        addPair(left, undoButton, redoButton); addPair(left, pageButton, layoutButton); addPair(left, moreButton, makeFitSelectionButton());
-        left.addView(makeZoomRow(), rowParams(48));
-        left.addView(bulkButton, rowParams(48));
-        // Short landscape phones need a scrollable tool rail. Keep the canvas on the right.
-        android.widget.ScrollView rail = new android.widget.ScrollView(this);
-        rail.setFillViewport(false);
-        rail.setVerticalScrollBarEnabled(true);
-        rail.addView(left);
-        root.addView(rail, new LinearLayout.LayoutParams(dp(224), LinearLayout.LayoutParams.MATCH_PARENT));
+    // ─────────────────────────── Contextual tools ───────────────────────────
 
-        LinearLayout right = new LinearLayout(this); right.setOrientation(LinearLayout.VERTICAL);
-        right.addView(quickBar, rowParams(55));
-        right.addView(canvasHost, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
-        right.addView(statusText);
-        root.addView(right, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f));
-    }
+    /** Rebuilds the tool row/rail only when the editing context actually changes. */
+    private void refreshTools() {
+        if (tools == null || canvasView == null) return;
+        boolean multi = canvasView.isMultiSelectMode();
+        boolean sel = canvasView.hasSelection();
+        boolean locked = sel && canvasView.isSelectedLocked();
+        String key = multi + "|" + sel + "|" + locked + "|" + canvasView.getSelectionCount() + "|"
+                + canvasView.hasBorderOnSelected() + "|" + canvasView.isSelectedOffPage() + "|"
+                + canvasView.isPortrait() + "|" + (canvasView.getItemCount() > 0) + "|" + (copiedFormatJson != null);
+        if (key.equals(toolsKey)) return;
+        toolsKey = key;
+        tools.removeAllViews();
 
-    private LinearLayout toolRow() {
-        LinearLayout row = new LinearLayout(this); row.setOrientation(LinearLayout.HORIZONTAL); row.setPadding(dp(4), dp(1), dp(4), dp(1)); return row;
-    }
-
-    private LinearLayout.LayoutParams rowParams(int h) { return new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(h)); }
-
-    private void addToRow(LinearLayout row, Button... buttons) { for (Button b : buttons) row.addView(b); }
-
-    private void addPair(LinearLayout parent, Button a, Button b) { LinearLayout row = toolRow(); addToRow(row, a, b); parent.addView(row, rowParams(48)); }
-
-
-    private java.util.LinkedHashMap<String, Button> shortcutSources() {
-        java.util.LinkedHashMap<String, Button> s = new java.util.LinkedHashMap<>();
-        s.put("+ Add", addButton); s.put("Crop", cropButton); s.put("Border", borderButton);
-        s.put("Rotate", rotateButton); s.put("Duplicate", duplicateButton);
-        s.put("Delete", deleteButton); s.put("Replace", replaceButton);
-        s.put("Undo", undoButton); s.put("Redo", redoButton);
-        s.put("Arrange", arrangeButton); s.put("Page ↻", pageButton);
-        s.put("Copy Fmt", copyFormatButton); s.put("Paste Fmt", pasteFormatButton);
-        s.put("Lock", lockButton); s.put("Multi", multiButton);
-        s.put("Layout", layoutButton); s.put("Edit All", bulkButton);
-        return s;
-    }
-
-    private Button makeFitSelectionButton() {
-        Button b = makeCompactButton("Fit Sel", false); b.setOnClickListener(v -> { if (!canvasView.fitSelection()) showToast("Select a picture first."); updateStatus(); }); return b;
-    }
-
-    private LinearLayout makeZoomRow() {
-        LinearLayout row = toolRow();
-        Button minus = makeCompactButton("−", false); minus.setOnClickListener(v -> { canvasView.zoomBy(0.82f); updateStatus(); });
-        Button fit = makeCompactButton("Fit", false); fit.setOnClickListener(v -> { canvasView.fitPage(); updateStatus(); });
-        zoomPercentButton = makeCompactButton("100%", false); zoomPercentButton.setOnClickListener(v -> { canvasView.fitPage(); updateStatus(); });
-        zoomPercentButton.setOnLongClickListener(v -> { if (!canvasView.fitSelection()) showToast("Select a picture first."); updateStatus(); return true; });
-        Button plus = makeCompactButton("+", false); plus.setOnClickListener(v -> { canvasView.zoomBy(1.22f); updateStatus(); });
-        addToRow(row, minus, fit, zoomPercentButton, plus); return row;
-    }
-
-    private void applyQuickBorder() {
-        if (!canvasView.hasSelection()) { showToast("Select a picture first."); return; }
-        pushUndo();
-        if (canvasView.setSelectedBorderPt(2f)) {
-            redo.clear();
-            Diagnostics.log("BORDER_QUICK_APPLIED", "2pt");
-            showToast("2 pt border applied. Long-press Border to adjust thickness.");
-        } else {
-            undo.pollFirst();
-            showToast("That picture is locked. Unlock it first.");
+        if (multi) {
+            int n = canvasView.getSelectionCount();
+            int editable = canvasView.countEditableSelected();
+            section(n == 0 ? "Tap pictures" : n + " selected");
+            tile(R.drawable.ic_check, "Done", ToolTile.STYLE_PRIMARY, true, false, () -> {
+                canvasView.setMultiSelectMode(false);
+                canvasView.clearSelection();
+            });
+            tile(R.drawable.ic_select, "All", 0, canvasView.getItemCount() > 0, false, canvasView::selectAll);
+            tile(R.drawable.ic_align, "Align", 0, n >= 2, false, this::showAlignMenu);
+            tile(R.drawable.ic_space, "Space", 0, n >= 3, false, this::showSpaceMenu);
+            tile(R.drawable.ic_border, "Border", 0, editable > 0, false, this::showBulkBorderMenu);
+            tile(R.drawable.ic_rotate, "Rotate", 0, editable > 0, false,
+                    () -> performBulkEdit(canvasView::applyBulkRotation90, "Rotation"));
+            tile(R.drawable.ic_size, "Size", 0, editable > 0, false, this::showExactSizeDialog);
+            tile(R.drawable.ic_park, canvasView.isSelectedOffPage() ? "On page" : "Off page", 0, editable > 0, false, this::toggleParking);
+            tile(R.drawable.ic_more_horiz, "More", 0, n > 0, false, this::showMultiMoreMenu);
+            tile(R.drawable.ic_delete, "Delete", ToolTile.STYLE_DANGER, editable > 0, false, this::deleteSelection);
+            return;
         }
+
+        if (!sel) {
+            section("Page");
+            tile(R.drawable.ic_add, "Add", ToolTile.STYLE_PRIMARY, true, false, () -> chooseImage(false));
+            boolean any = canvasView.getItemCount() > 0;
+            tile(R.drawable.ic_arrange, "Arrange", 0, any, false, this::autoArrange);
+            tile(R.drawable.ic_select, "Select", 0, any, false, () -> canvasView.setMultiSelectMode(true));
+            boolean portrait = canvasView.isPortrait();
+            tile(portrait ? R.drawable.ic_page_landscape : R.drawable.ic_page_portrait,
+                    portrait ? "Landscape" : "Portrait", 0, true, false, this::toggleOrientation);
+            return;
+        }
+
+        boolean free = !locked;
+        section("Picture");
+        tile(R.drawable.ic_add, "Add", ToolTile.STYLE_PRIMARY, true, false, () -> chooseImage(false));
+        tile(R.drawable.ic_crop, "Crop", 0, free, false, this::showInlineCrop);
+        ToolTile border = tile(R.drawable.ic_border, "Border", 0, free, canvasView.hasBorderOnSelected(), this::toggleBorder);
+        border.setOnLongClickListener(v -> { showBorderDialog(); return true; });
+        tile(R.drawable.ic_rotate, "Rotate", 0, free, false,
+                () -> simpleEdit(canvasView::rotateSelected));
+        tile(R.drawable.ic_size, "Size", 0, free, false, this::showExactSizeDialog);
+        tile(R.drawable.ic_copy, "Duplicate", 0, true, false,
+                () -> simpleEdit(canvasView::duplicateSelected));
+        tile(R.drawable.ic_park, canvasView.isSelectedOffPage() ? "On page" : "Off page", 0, free, false, this::toggleParking);
+        tile(locked ? R.drawable.ic_lock : R.drawable.ic_lock_open, locked ? "Locked" : "Lock", 0, true, locked, this::toggleLock);
+        tile(R.drawable.ic_more_horiz, "More", 0, true, false, this::showPictureMoreMenu);
+        tile(R.drawable.ic_delete, "Delete", ToolTile.STYLE_DANGER, free, false, this::deleteSelection);
+    }
+
+    private ToolTile tile(int icon, String label, int style, boolean enabled, boolean active, Runnable action) {
+        ToolTile t = new ToolTile(this, icon, label).style(style).active(active);
+        t.setEnabled(enabled);
+        t.setOnClickListener(v -> {
+            lastTile = v;
+            UsageInsights.record(getApplicationContext(), label);
+            action.run();
+        });
+        LinearLayout.LayoutParams lp = railLayout
+                ? new LinearLayout.LayoutParams(-1, dp(66))
+                : new LinearLayout.LayoutParams(dp(68), -1);
+        if (railLayout) lp.bottomMargin = dp(2); else lp.rightMargin = dp(2);
+        tools.addView(t, lp);
+        return t;
+    }
+
+    /** Small heading. Shown only on the rail, where there is room. */
+    private void section(String text) {
+        if (!railLayout) return;
+        TextView t = new TextView(this);
+        t.setText(text.toUpperCase(java.util.Locale.US));
+        t.setTextColor(Theme.TEXT_SOFT);
+        t.setTextSize(10.5f);
+        t.setLetterSpacing(0.06f);
+        t.setTypeface(Typeface.DEFAULT_BOLD);
+        t.setGravity(Gravity.CENTER);
+        t.setPadding(0, dp(2), 0, dp(8));
+        tools.addView(t, new LinearLayout.LayoutParams(-1, -2));
+    }
+
+    // ───────────────────────────── Actions ─────────────────────────────
+
+    private interface BoolAction { boolean run(); }
+    private interface BulkOperation { int apply(); }
+
+    /** One undo step around a single canvas edit. */
+    private void simpleEdit(BoolAction action) {
+        pushUndo();
+        if (action.run()) redo.clear(); else { undo.pollFirst(); showToast("That picture is locked. Unlock it first."); }
+        updateControls();
+    }
+
+    private void performLayout(BoolAction action) {
+        pushUndo();
+        if (action.run()) { redo.clear(); updateControls(); }
+        else { undo.pollFirst(); showToast("That needs more unlocked pictures selected."); }
+    }
+
+    private void performBulkEdit(BulkOperation operation, String name) {
+        if (canvasView.countEditableSelected() < 1) { showToast("Select one or more unlocked pictures first."); return; }
+        pushUndo();
+        int changed = operation.apply();
+        if (changed > 0) { redo.clear(); showUndoBar(name + " applied to " + changed + (changed == 1 ? " picture" : " pictures")); }
+        else { undo.pollFirst(); showToast("No pictures changed."); }
+        updateControls();
+    }
+
+    private void autoArrange() {
+        if (canvasView.getOnPageCount() == 0) { showToast("Nothing on the page to arrange."); return; }
+        pushUndo();
+        canvasView.autoArrange();
+        redo.clear();
+        showUndoBar("Pictures arranged");
+        updateControls();
+    }
+
+    private void toggleOrientation() {
+        pushUndo();
+        canvasView.toggleOrientation();
+        redo.clear();
+        canvasView.fitPage();
+        updateControls();
+    }
+
+    private void toggleBorder() {
+        boolean has = canvasView.hasBorderOnSelected();
+        pushUndo();
+        if (canvasView.setSelectedBorderPt(has ? 0f : 2f)) {
+            redo.clear();
+            Diagnostics.log("BORDER_TOGGLED", has ? "off" : "2pt");
+            if (!has) showToast("2 pt border on. Long-press Border to change thickness.");
+        } else { undo.pollFirst(); showToast("That picture is locked. Unlock it first."); }
+        updateControls();
+    }
+
+    private void toggleParking() {
+        pushUndo();
+        int r = canvasView.toggleSelectedParking();
+        if (r == 0) { undo.pollFirst(); showToast("Unlock the picture first."); updateControls(); return; }
+        redo.clear();
+        if (r == 1) {
+            canvasView.fitPage();
+            showUndoBar("Moved off the page — it won't print");
+        } else showUndoBar("Placed on the page");
+        updateControls();
+    }
+
+    private void toggleLock() {
+        if (!canvasView.hasSelection()) return;
+        pushUndo();
+        if (canvasView.toggleLockSelected()) redo.clear(); else undo.pollFirst();
+        updateControls();
+    }
+
+    private void deleteSelection() {
+        int n = Math.max(1, canvasView.countEditableSelected());
+        pushUndo();
+        if (canvasView.deleteSelected()) {
+            redo.clear();
+            if (canvasView.isMultiSelectMode()) canvasView.setMultiSelectMode(false);
+            showUndoBar(n == 1 ? "Picture deleted" : n + " pictures deleted");
+        } else { undo.pollFirst(); showToast("Locked pictures can't be deleted."); }
         updateControls();
     }
 
     private void copyFormat() {
         copiedFormatJson = canvasView.getSelectedFormatJson();
         if (copiedFormatJson == null) showToast("Select a picture first.");
-        else { Diagnostics.log("FORMAT_COPIED", canvasView.selectedSizeText()); showToast("Format copied. Select another picture and tap Paste Fmt."); }
+        else { Diagnostics.log("FORMAT_COPIED", canvasView.selectedSizeText()); showToast("Style copied. Select another picture → More → Paste style."); }
+        toolsKey = "";
         updateControls();
     }
 
     private void pasteFormat() {
-        if (copiedFormatJson == null) { showToast("Copy a picture's format first."); return; }
+        if (copiedFormatJson == null) { showToast("Copy a picture's style first."); return; }
+        if (canvasView.getSelectionCount() > 1) { performBulkEdit(() -> canvasView.applyBulkFormatJson(copiedFormatJson), "Style"); return; }
         pushUndo();
-        if (canvasView.applyFormatJson(copiedFormatJson)) { redo.clear(); showToast("Format pasted."); }
+        if (canvasView.applyFormatJson(copiedFormatJson)) { redo.clear(); showToast("Style pasted."); }
         else { undo.pollFirst(); showToast("Select an unlocked picture first."); }
         updateControls();
     }
 
-    private void toggleLock() {
-        if (!canvasView.hasSelection()) { showToast("Select a picture first."); return; }
-        pushUndo();
-        if (canvasView.toggleLockSelected()) redo.clear(); else undo.pollFirst();
-        updateControls();
+    // ───────────────────────────── Menus ─────────────────────────────
+
+    private void showPictureMoreMenu() {
+        View anchor = toolAnchor();
+        PopupMenu m = new PopupMenu(this, anchor);
+        Menu menu = m.getMenu();
+        boolean free = !canvasView.isSelectedLocked();
+        menu.add(0, 1, 0, "Replace picture…").setEnabled(free);
+        menu.add(0, 2, 0, "Border thickness…").setEnabled(free);
+        menu.add(0, 3, 0, "Copy style");
+        menu.add(0, 4, 0, "Paste style").setEnabled(free && copiedFormatJson != null);
+        menu.add(0, 5, 0, "Bring forward");
+        menu.add(0, 6, 0, "Send backward");
+        menu.add(0, 7, 0, "Nudge…").setEnabled(free);
+        SubMenu copies = menu.addSubMenu(0, 8, 0, "Make copies");
+        copies.add(0, 81, 0, "2 copies");
+        copies.add(0, 82, 0, "4 copies");
+        copies.add(0, 83, 0, "Fill the page with this");
+        menu.add(0, 9, 0, "Zoom to picture");
+        m.setOnMenuItemClickListener(item -> {
+            UsageInsights.record(this, String.valueOf(item.getTitle()));
+            switch (item.getItemId()) {
+                case 1: chooseImage(true); break;
+                case 2: showBorderDialog(); break;
+                case 3: copyFormat(); break;
+                case 4: pasteFormat(); break;
+                case 5: performLayout(canvasView::bringSelectedForward); break;
+                case 6: performLayout(canvasView::sendSelectedBackward); break;
+                case 7: showNudgeDialog(); break;
+                case 81: performLayout(() -> canvasView.duplicateSelectedCopies(2)); break;
+                case 82: performLayout(() -> canvasView.duplicateSelectedCopies(4)); break;
+                case 83: confirmFillSheet(); break;
+                case 9: canvasView.fitSelection(); break;
+                default: return false;
+            }
+            return true;
+        });
+        m.show();
     }
 
-    private void toggleMultiSelect() {
-        boolean next = !canvasView.isMultiSelectMode();
-        canvasView.setMultiSelectMode(next);
-        showToast(next ? "Multi-select ON. Tap pictures to add/remove them." : "Multi-select OFF.");
-        updateControls();
+    private void showMultiMoreMenu() {
+        PopupMenu m = new PopupMenu(this, toolAnchor());
+        Menu menu = m.getMenu();
+        menu.add(0, 1, 0, "Paste style to selected").setEnabled(copiedFormatJson != null);
+        menu.add(0, 2, 0, "Lock / unlock selected");
+        menu.add(0, 3, 0, "Nudge…");
+        m.setOnMenuItemClickListener(item -> {
+            switch (item.getItemId()) {
+                case 1: pasteFormat(); break;
+                case 2: toggleLock(); break;
+                case 3: showNudgeDialog(); break;
+                default: return false;
+            }
+            return true;
+        });
+        m.show();
     }
 
-
-    private interface BulkOperation { int apply(); }
-
-    private void performBulkEdit(BulkOperation operation, String name) {
-        int available = canvasView.countEditableSelected();
-        if (available < 1) {
-            showToast("Select one or more unlocked pictures first.");
-            return;
-        }
-        pushUndo();
-        int changed = operation.apply();
-        if (changed > 0) {
-            redo.clear();
-            showToast(name + " applied to " + changed + " picture(s). Undo reverses all.");
-        } else {
-            undo.pollFirst();
-            showToast("No pictures changed.");
-        }
-        updateControls();
+    private void showAlignMenu() {
+        PopupMenu m = new PopupMenu(this, toolAnchor());
+        String[] labels = {"Left edges", "Centers (across)", "Right edges", "Top edges", "Middles (down)", "Bottom edges"};
+        String[] modes = {"left", "center", "right", "top", "middle", "bottom"};
+        for (int i = 0; i < labels.length; i++) m.getMenu().add(0, i, i, labels[i]);
+        m.setOnMenuItemClickListener(item -> { performLayout(() -> canvasView.alignSelected(modes[item.getItemId()])); return true; });
+        m.show();
     }
 
-    private void showBulkTools() {
-        int count = canvasView.getSelectionCount();
-        if (count == 0) {
-            showToast("Tap Multi, then select pictures to edit.");
-            return;
-        }
-        final String[] actions = new String[] {
-                "Apply 2 pt black border",
-                "Remove borders",
-                "Rotate 90 degrees",
-                "Set the same printed size",
-                "Paste copied format"
-        };
-        new AlertDialog.Builder(this)
-                .setTitle("Edit " + count + " selected picture(s)")
-                .setMessage("Changes apply only to the selected unlocked pictures. Their positions stay separate. Undo reverses the whole change.")
-                .setItems(actions, (d, index) -> {
-                    switch (index) {
-                        case 0: performBulkEdit(() -> canvasView.applyBulkBorder(2f), "Border"); break;
-                        case 1: performBulkEdit(() -> canvasView.applyBulkBorder(0f), "Remove border"); break;
-                        case 2: performBulkEdit(() -> canvasView.applyBulkRotation90(), "Rotation"); break;
-                        case 3: showExactSizeDialog(); break;
-                        case 4:
-                            if (copiedFormatJson == null) showToast("Copy a picture's format first.");
-                            else performBulkEdit(() -> canvasView.applyBulkFormatJson(copiedFormatJson), "Format");
-                            break;
-                    }
-                })
-                .setNegativeButton("Cancel", null)
-                .show();
+    private void showSpaceMenu() {
+        PopupMenu m = new PopupMenu(this, toolAnchor());
+        m.getMenu().add(0, 0, 0, "Even spacing across");
+        m.getMenu().add(0, 1, 1, "Even spacing down");
+        m.setOnMenuItemClickListener(item -> { performLayout(() -> canvasView.distributeSelected(item.getItemId() == 0)); return true; });
+        m.show();
     }
 
-    private void showLayoutTools() {
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(dp(8), dp(4), dp(8), dp(4));
-        addDialogToolRow(box,
-                toolAction("Left", () -> performLayout(() -> canvasView.alignSelected("left"))),
-                toolAction("Center", () -> performLayout(() -> canvasView.alignSelected("center"))),
-                toolAction("Right", () -> performLayout(() -> canvasView.alignSelected("right"))));
-        addDialogToolRow(box,
-                toolAction("Top", () -> performLayout(() -> canvasView.alignSelected("top"))),
-                toolAction("Middle", () -> performLayout(() -> canvasView.alignSelected("middle"))),
-                toolAction("Bottom", () -> performLayout(() -> canvasView.alignSelected("bottom"))));
-        addDialogToolRow(box,
-                toolAction("Space H", () -> performLayout(() -> canvasView.distributeSelected(true))),
-                toolAction("Space V", () -> performLayout(() -> canvasView.distributeSelected(false))),
-                toolAction("Exact Size", this::showExactSizeDialog));
-        addDialogToolRow(box,
-                toolAction("Nudge", this::showNudgeDialog),
-                toolAction("Forward", () -> performLayout(() -> canvasView.bringSelectedForward())),
-                toolAction("Backward", () -> performLayout(() -> canvasView.sendSelectedBackward())));
-        addDialogToolRow(box,
-                toolAction("Duplicate ×2", () -> performLayout(() -> canvasView.duplicateSelectedCopies(2))),
-                toolAction("Duplicate ×4", () -> performLayout(() -> canvasView.duplicateSelectedCopies(4))),
-                toolAction("Fill Sheet", () -> performLayout(() -> canvasView.fillSheetWithSelected())));
-        addDialogToolRow(box,
-                toolAction("Save Template", this::saveTemplateDialog),
-                toolAction("Load Template", this::loadTemplateDialog),
-                toolAction("Fit Selection", () -> { if (!canvasView.fitSelection()) showToast("Select a picture first."); updateStatus(); }));
-        new AlertDialog.Builder(this)
-                .setTitle("Layout tools")
-                .setMessage("For alignment/distribution, turn on Multi and select 2 or more pictures.")
-                .setView(box)
-                .setPositiveButton("Close", null)
-                .show();
+    private void showBulkBorderMenu() {
+        PopupMenu m = new PopupMenu(this, toolAnchor());
+        m.getMenu().add(0, 0, 0, "2 pt black border");
+        m.getMenu().add(0, 1, 1, "Remove borders");
+        m.setOnMenuItemClickListener(item -> {
+            float pt = item.getItemId() == 0 ? 2f : 0f;
+            performBulkEdit(() -> canvasView.applyBulkBorder(pt), pt > 0 ? "Border" : "Border removal");
+            return true;
+        });
+        m.show();
     }
 
-    private interface BoolAction { boolean run(); }
-
-    private void performLayout(BoolAction action) {
-        pushUndo();
-        if (action.run()) { redo.clear(); updateControls(); }
-        else { undo.pollFirst(); showToast("That action needs a suitable unlocked selection."); }
+    private void showOverflowMenu(View anchor) {
+        PopupMenu m = new PopupMenu(this, anchor);
+        Menu menu = m.getMenu();
+        boolean any = canvasView.getItemCount() > 0;
+        menu.add(0, 1, 0, "Save page as template…").setEnabled(any);
+        menu.add(0, 2, 0, "Open template…");
+        menu.add(0, 3, 0, "Save page as PDF…").setEnabled(any);
+        menu.add(0, 4, 0, "Check printer");
+        menu.add(0, 5, 0, "Printer settings…");
+        menu.add(0, 6, 0, "New picture defaults…");
+        SubMenu diag = menu.addSubMenu(0, 7, 0, "Troubleshooting");
+        diag.add(0, 71, 0, "Copy diagnostic log");
+        diag.add(0, 72, 0, "Save diagnostic log…");
+        diag.add(0, 73, 0, "My tool usage");
+        menu.add(0, 8, 0, "Clear page…").setEnabled(any);
+        menu.add(0, 9, 0, "Help");
+        m.setOnMenuItemClickListener(item -> {
+            UsageInsights.record(this, String.valueOf(item.getTitle()));
+            switch (item.getItemId()) {
+                case 1: saveTemplateDialog(); break;
+                case 2: loadTemplateDialog(); break;
+                case 3: exportPdf(); break;
+                case 4: wakePrinter(); break;
+                case 5: showPrinterSettingsDialog(); break;
+                case 6: showEditorPreferences(); break;
+                case 71: copyLog(); break;
+                case 72: exportLog(); break;
+                case 73: showUsageInsights(); break;
+                case 8: confirmClear(); break;
+                case 9: showAbout(); break;
+                default: return false;
+            }
+            return true;
+        });
+        m.show();
     }
 
-    private Button toolAction(String text, Runnable action) {
-        Button b = new Button(this);
-        b.setText(text); b.setTextSize(11); b.setAllCaps(false); b.setTextColor(Color.WHITE);
-        b.setMinHeight(0); b.setMinWidth(0); b.setPadding(dp(3), 0, dp(3), 0);
-        applyButtonBackground(b, 0xFF343A44, true);
-        b.setOnClickListener(v -> action.run());
-        return b;
+    /** Popups open next to the tile that was just tapped. */
+    private View toolAnchor() {
+        if (lastTile != null && lastTile.getParent() == tools) return lastTile;
+        return tools.getChildCount() > 0 ? tools.getChildAt(tools.getChildCount() - 1) : canvasView;
     }
 
-    private void addDialogToolRow(LinearLayout parent, Button... buttons) {
-        LinearLayout row = new LinearLayout(this); row.setOrientation(LinearLayout.HORIZONTAL);
-        for (Button b : buttons) { LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(38), 1f); lp.setMargins(dp(2), dp(2), dp(2), dp(2)); row.addView(b, lp); }
-        parent.addView(row);
+    // ───────────────────────────── Dialogs ─────────────────────────────
+
+    private AlertDialog.Builder dialog() {
+        return new AlertDialog.Builder(this, android.R.style.Theme_Material_Light_Dialog_Alert);
     }
 
     private void showExactSizeDialog() {
         if (!canvasView.hasSelection()) { showToast("Select a picture first."); return; }
         float[] size = canvasView.getSelectedSizeInches();
-        LinearLayout box = new LinearLayout(this); box.setOrientation(LinearLayout.VERTICAL); box.setPadding(dp(20), dp(4), dp(20), 0);
-        EditText w = new EditText(this); w.setHint("Width in inches"); w.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL); w.setText(String.format(java.util.Locale.US, "%.2f", size[0]));
-        EditText h = new EditText(this); h.setHint("Height in inches"); h.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL); h.setText(String.format(java.util.Locale.US, "%.2f", size[1]));
-        box.addView(w); box.addView(h);
-        new AlertDialog.Builder(this).setTitle("Exact printed size").setView(box).setNegativeButton("Cancel", null)
+        final float ratio = size[1] > 0 ? size[0] / size[1] : 1f;
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(22), dp(4), dp(22), 0);
+        EditText w = numberField("Width (inches)", size[0]);
+        EditText h = numberField("Height (inches)", size[1]);
+        CheckBox keep = new CheckBox(this);
+        keep.setText("Keep proportions");
+        keep.setChecked(true);
+        final boolean[] syncing = {false};
+        w.addTextChangedListener(new SimpleWatcher(() -> {
+            if (!keep.isChecked() || syncing[0] || !w.hasFocus()) return;
+            try { syncing[0] = true; h.setText(fmt(Float.parseFloat(w.getText().toString()) / ratio)); } catch (Exception ignored) {} finally { syncing[0] = false; }
+        }));
+        h.addTextChangedListener(new SimpleWatcher(() -> {
+            if (!keep.isChecked() || syncing[0] || !h.hasFocus()) return;
+            try { syncing[0] = true; w.setText(fmt(Float.parseFloat(h.getText().toString()) * ratio)); } catch (Exception ignored) {} finally { syncing[0] = false; }
+        }));
+        box.addView(label("Width (in)")); box.addView(w);
+        box.addView(label("Height (in)")); box.addView(h);
+        box.addView(keep);
+        int count = Math.max(1, canvasView.countEditableSelected());
+        dialog().setTitle(count > 1 ? "Printed size for " + count + " pictures" : "Printed size")
+                .setView(box).setNegativeButton("Cancel", null)
                 .setPositiveButton("Apply", (d, which) -> {
-                    try { float wi=Float.parseFloat(w.getText().toString()); float hi=Float.parseFloat(h.getText().toString()); pushUndo(); if(canvasView.applyBulkSizeInches(wi,hi) > 0) redo.clear(); else { undo.pollFirst(); showToast("Enter a size that fits the sheet."); } updateControls(); }
-                    catch(Exception e){ showToast("Enter valid width and height."); }
+                    try {
+                        float wi = Float.parseFloat(w.getText().toString());
+                        float hi = Float.parseFloat(h.getText().toString());
+                        pushUndo();
+                        if (canvasView.applyBulkSizeInches(wi, hi) > 0) redo.clear();
+                        else { undo.pollFirst(); showToast("Enter a size that fits on the page."); }
+                        updateControls();
+                    } catch (Exception e) { showToast("Enter a valid width and height."); }
                 }).show();
+    }
+
+    private EditText numberField(String hint, float value) {
+        EditText e = new EditText(this);
+        e.setHint(hint);
+        e.setSingleLine(true);
+        e.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL);
+        e.setText(fmt(value));
+        e.setSelectAllOnFocus(true);
+        return e;
+    }
+
+    private TextView label(String s) {
+        TextView t = new TextView(this);
+        t.setText(s);
+        t.setTextColor(Theme.TEXT_SOFT);
+        t.setTextSize(12);
+        t.setPadding(dp(4), dp(10), 0, 0);
+        return t;
+    }
+
+    private static String fmt(float v) { return String.format(java.util.Locale.US, "%.2f", v); }
+
+    private static final class SimpleWatcher implements TextWatcher {
+        private final Runnable r;
+        SimpleWatcher(Runnable r) { this.r = r; }
+        @Override public void beforeTextChanged(CharSequence s, int a, int b, int c) {}
+        @Override public void onTextChanged(CharSequence s, int a, int b, int c) {}
+        @Override public void afterTextChanged(Editable s) { r.run(); }
     }
 
     private void showNudgeDialog() {
         if (!canvasView.hasSelection()) { showToast("Select a picture first."); return; }
-        LinearLayout box = new LinearLayout(this); box.setOrientation(LinearLayout.VERTICAL); box.setPadding(dp(20), dp(6), dp(20), dp(6));
-        TextView note = new TextView(this); note.setText("Fine move: 0.02 inch per tap"); note.setTextColor(Color.DKGRAY); note.setGravity(Gravity.CENTER); box.addView(note);
-        Button up=toolAction("↑",()->nudge(0f,-0.02f)); LinearLayout r1=new LinearLayout(this); r1.setGravity(Gravity.CENTER); r1.addView(up,new LinearLayout.LayoutParams(dp(80),dp(42))); box.addView(r1);
-        LinearLayout r2=new LinearLayout(this); Button left=toolAction("←",()->nudge(-0.02f,0f)); Button right=toolAction("→",()->nudge(0.02f,0f)); r2.addView(left,new LinearLayout.LayoutParams(0,dp(42),1f)); r2.addView(right,new LinearLayout.LayoutParams(0,dp(42),1f)); box.addView(r2);
-        Button down=toolAction("↓",()->nudge(0f,0.02f)); LinearLayout r3=new LinearLayout(this); r3.setGravity(Gravity.CENTER); r3.addView(down,new LinearLayout.LayoutParams(dp(80),dp(42))); box.addView(r3);
-        new AlertDialog.Builder(this).setTitle("Nudge selection").setView(box).setPositiveButton("Done",null).show();
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setGravity(Gravity.CENTER_HORIZONTAL);
+        box.setPadding(dp(20), dp(6), dp(20), dp(6));
+        TextView note = label("Each tap moves 0.02 inch");
+        note.setGravity(Gravity.CENTER);
+        box.addView(note);
+        LinearLayout r1 = new LinearLayout(this); r1.setGravity(Gravity.CENTER);
+        r1.addView(nudgeButton("↑", 0f, -0.02f));
+        LinearLayout r2 = new LinearLayout(this); r2.setGravity(Gravity.CENTER);
+        r2.addView(nudgeButton("←", -0.02f, 0f));
+        View gap = new View(this); r2.addView(gap, new LinearLayout.LayoutParams(dp(56), dp(56)));
+        r2.addView(nudgeButton("→", 0.02f, 0f));
+        LinearLayout r3 = new LinearLayout(this); r3.setGravity(Gravity.CENTER);
+        r3.addView(nudgeButton("↓", 0f, 0.02f));
+        box.addView(r1); box.addView(r2); box.addView(r3);
+        dialog().setTitle("Nudge").setView(box).setPositiveButton("Done", null).show();
     }
 
-    private void nudge(float dx, float dy) { pushUndo(); if(canvasView.nudgeSelected(dx,dy)) redo.clear(); else undo.pollFirst(); updateControls(); }
+    private View nudgeButton(String arrow, float dx, float dy) {
+        TextView b = new TextView(this);
+        b.setText(arrow);
+        b.setTextSize(22);
+        b.setTextColor(Theme.TEXT);
+        b.setGravity(Gravity.CENTER);
+        b.setBackground(pill(Theme.BACKGROUND, Theme.OUTLINE, 14));
+        b.setClickable(true);
+        b.setOnClickListener(v -> { pushUndo(); if (canvasView.nudgeSelected(dx, dy)) redo.clear(); else undo.pollFirst(); updateControls(); });
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(56), dp(56));
+        lp.setMargins(dp(4), dp(4), dp(4), dp(4));
+        b.setLayoutParams(lp);
+        return b;
+    }
+
+    private void confirmFillSheet() {
+        dialog().setTitle("Fill the page with copies?")
+                .setMessage("Pictures on the page are replaced by copies of this one. Pictures off the page and locked pictures stay. You can undo this.")
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Fill page", (d, w) -> {
+                    performLayout(canvasView::fillSheetWithSelected);
+                    showUndoBar("Page filled with copies");
+                }).show();
+    }
 
     private void saveTemplateDialog() {
         if (canvasView.getItemCount() == 0) { showToast("There is no layout to save."); return; }
-        EditText input = new EditText(this); input.setHint("Template name"); input.setSingleLine(true); input.setText("My layout"); input.setSelectAllOnFocus(true);
-        new AlertDialog.Builder(this).setTitle("Save layout template").setView(input).setNegativeButton("Cancel",null)
-                .setPositiveButton("Save",(d,w)->{ String name=input.getText().toString().trim(); if(name.isEmpty())name="My layout"; getSharedPreferences("templates",MODE_PRIVATE).edit().putString(name,canvasView.toJson()).apply(); Diagnostics.log("TEMPLATE_SAVED",name); showToast("Template saved: "+name); }).show();
+        EditText input = new EditText(this);
+        input.setHint("Template name"); input.setSingleLine(true); input.setText("My layout"); input.setSelectAllOnFocus(true);
+        FrameLayout wrap = new FrameLayout(this); wrap.setPadding(dp(22), dp(6), dp(22), 0); wrap.addView(input);
+        dialog().setTitle("Save page as template").setView(wrap).setNegativeButton("Cancel", null)
+                .setPositiveButton("Save", (d, w) -> {
+                    String name = input.getText().toString().trim();
+                    if (name.isEmpty()) name = "My layout";
+                    getSharedPreferences("templates", MODE_PRIVATE).edit().putString(name, canvasView.toJson()).apply();
+                    Diagnostics.log("TEMPLATE_SAVED", name);
+                    showToast("Template saved: " + name);
+                }).show();
     }
 
     private void loadTemplateDialog() {
-        java.util.Map<String,?> all = getSharedPreferences("templates",MODE_PRIVATE).getAll();
-        if (all.isEmpty()) { showToast("No saved templates yet."); return; }
-        String[] names = all.keySet().toArray(new String[0]); java.util.Arrays.sort(names);
-        new AlertDialog.Builder(this).setTitle("Load template").setItems(names,(d,which)->{ Object val=all.get(names[which]); if(val instanceof String){ pushUndo(); canvasView.fromJson((String)val); redo.clear(); persist(); Diagnostics.log("TEMPLATE_LOADED",names[which]); updateControls(); } }).setNegativeButton("Cancel",null).show();
+        java.util.Map<String, ?> all = getSharedPreferences("templates", MODE_PRIVATE).getAll();
+        if (all.isEmpty()) { showToast("No saved templates yet. Use ⋮ → Save page as template."); return; }
+        String[] names = all.keySet().toArray(new String[0]);
+        java.util.Arrays.sort(names);
+        dialog().setTitle("Open template").setItems(names, (d, which) -> {
+            Object val = all.get(names[which]);
+            if (val instanceof String) {
+                pushUndo();
+                canvasView.fromJson((String) val);
+                redo.clear();
+                persist();
+                Diagnostics.log("TEMPLATE_LOADED", names[which]);
+                showUndoBar("Template opened");
+                updateControls();
+            }
+        }).setNegativeButton("Cancel", null).show();
     }
-
-    private void showMoreMenu(View anchor) {
-        PopupMenu menu = new PopupMenu(this, anchor);
-        menu.getMenu().add("Editor preferences");
-        menu.getMenu().add("My tool usage");
-        menu.getMenu().add("Customize quick tools");
-        menu.getMenu().add("Test Printer Connection");
-        menu.getMenu().add("Printer Keep-Awake Settings");
-        menu.getMenu().add("Export Letter PDF");
-        menu.getMenu().add("Copy Diagnostic Log");
-        menu.getMenu().add("Export Diagnostic Log");
-        menu.getMenu().add("Clear Sheet");
-        menu.getMenu().add("About / Troubleshooting");
-        menu.setOnMenuItemClickListener(item -> {
-            String t = String.valueOf(item.getTitle());
-            UsageInsights.record(this, t);
-            if (t.startsWith("Editor preferences")) showEditorPreferences();
-            else if (t.startsWith("My tool usage")) showUsageInsights();
-            else if (t.startsWith("Customize quick")) quickBar.setArranging(true);
-            else if (t.startsWith("Test Printer")) wakePrinter();
-            else if (t.startsWith("Printer Keep-Awake")) showPrinterSettingsDialog(false);
-            else if (t.startsWith("Export Letter")) exportPdf();
-            else if (t.startsWith("Copy Diagnostic")) copyLog();
-            else if (t.startsWith("Export Diagnostic")) exportLog();
-            else if (t.startsWith("Clear Sheet")) confirmClear();
-            else showAbout();
-            return true;
-        });
-        menu.show();
-    }
-
 
     private void showEditorPreferences() {
         SharedPreferences prefs = getSharedPreferences("editor", MODE_PRIVATE);
-        LinearLayout form = new LinearLayout(this);
-        form.setOrientation(LinearLayout.VERTICAL);
-        form.setPadding(dp(20), dp(8), dp(20), dp(8));
         CheckBox border = new CheckBox(this);
-        border.setText("Add a 2 pt black border to every new picture");
+        border.setText("Give every new picture a 2 pt black border");
         border.setChecked(prefs.getBoolean("auto_border", true));
-        form.addView(border);
-        CheckBox adaptive = new CheckBox(this);
-        adaptive.setText("Suggest my most-used tools after 20 taps");
-        adaptive.setChecked(prefs.getBoolean("smart_tools", true));
-        form.addView(adaptive);
-        new AlertDialog.Builder(this).setTitle("Editor preferences").setView(form)
+        FrameLayout wrap = new FrameLayout(this); wrap.setPadding(dp(18), dp(8), dp(18), 0); wrap.addView(border);
+        dialog().setTitle("New picture defaults").setView(wrap)
                 .setNegativeButton("Cancel", null)
                 .setPositiveButton("Save", (d, w) -> {
-                    prefs.edit().putBoolean("auto_border", border.isChecked())
-                            .putBoolean("smart_tools", adaptive.isChecked()).apply();
+                    prefs.edit().putBoolean("auto_border", border.isChecked()).apply();
                     canvasView.setDefaultNewImageBorder(border.isChecked() ? 2f : 0f);
-                    quickBar.refresh();
                     Diagnostics.log("EDITOR_PREFS_CHANGED", "auto_border=" + border.isChecked());
                 }).show();
     }
 
     private void showUsageInsights() {
-        new AlertDialog.Builder(this).setTitle("My tool usage")
+        dialog().setTitle("My tool usage")
                 .setMessage(UsageInsights.report(this))
                 .setNegativeButton("Close", null)
                 .setNeutralButton("Reset counts", (d, w) ->
-                        new AlertDialog.Builder(this).setTitle("Reset usage counts?")
+                        dialog().setTitle("Reset usage counts?")
                                 .setMessage("This does not change any saved labels.")
                                 .setNegativeButton("Cancel", null)
-                                .setPositiveButton("Reset", (q, k) -> {
-                                    UsageInsights.clear(this);
-                                    quickBar.refresh();
-                                }).show())
+                                .setPositiveButton("Reset", (q, k) -> UsageInsights.clear(this)).show())
                 .setPositiveButton("Copy", (d, w) -> {
-                    ClipboardManager cm = (ClipboardManager)getSystemService(Context.CLIPBOARD_SERVICE);
+                    ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
                     if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("LabelSheet usage", UsageInsights.report(this)));
                     showToast("Usage report copied.");
                 }).show();
     }
+
+    private void showBorderDialog() {
+        if (!canvasView.hasSelection()) return;
+        float current = canvasView.getSelectedBorderPt();
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(22), dp(8), dp(22), 0);
+        TextView value = new TextView(this);
+        value.setTextColor(Theme.TEXT);
+        value.setTextSize(15);
+        value.setText(current < 0.5f ? "Border: Off" : String.format(java.util.Locale.US, "Thickness: %.0f pt", current));
+        SeekBar seek = new SeekBar(this);
+        seek.setMax(24);
+        seek.setProgress(Math.round(current));
+        seek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar s, int progress, boolean fromUser) {
+                value.setText(progress == 0 ? "Border: Off" : "Thickness: " + progress + " pt");
+            }
+            @Override public void onStartTrackingTouch(SeekBar s) { }
+            @Override public void onStopTrackingTouch(SeekBar s) { }
+        });
+        box.addView(value);
+        box.addView(seek);
+        dialog().setTitle("Border thickness")
+                .setMessage("Black outline. Slide to 0 to remove it.")
+                .setView(box)
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Apply", (d, w) -> {
+                    pushUndo();
+                    if (canvasView.setSelectedBorderPt(seek.getProgress())) redo.clear(); else undo.pollFirst();
+                    updateControls();
+                })
+                .show();
+    }
+
+    /** Live crop overlay over the page, adjusted with four sliders. */
+    private void showInlineCrop() {
+        if (!canvasView.hasSelection() || canvasView.isSelectedLocked()) { showToast("Select an unlocked picture first."); return; }
+        if (cropOverlay != null) return;
+        final float[] original = canvasView.getSelectedCrop();
+        final int[] values = new int[] {
+                Math.round(original[0] * 100f), Math.round(original[1] * 100f),
+                Math.round(original[2] * 100f), Math.round(original[3] * 100f)
+        };
+        pushUndo();
+        canvasView.fitSelection();
+
+        FrameLayout scrim = new FrameLayout(this);
+        cropOverlay = scrim;
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setClickable(true);
+        panel.setPadding(dp(16), dp(12), dp(16), dp(10));
+        GradientDrawable background = new GradientDrawable();
+        background.setColor(Theme.SURFACE);
+        background.setCornerRadii(new float[]{dp(20), dp(20), dp(20), dp(20), 0, 0, 0, 0});
+        panel.setBackground(background);
+        panel.setElevation(dp(8));
+
+        TextView title = new TextView(this);
+        title.setText("Crop — trim each edge");
+        title.setTextColor(Theme.TEXT);
+        title.setTextSize(16);
+        title.setTypeface(Typeface.DEFAULT_BOLD);
+        panel.addView(title);
+        String[] names = new String[]{"Left", "Top", "Right", "Bottom"};
+        for (int i = 0; i < 4; i++) {
+            final int idx = i;
+            LinearLayout line = new LinearLayout(this);
+            line.setOrientation(LinearLayout.HORIZONTAL);
+            line.setGravity(Gravity.CENTER_VERTICAL);
+            TextView lbl = new TextView(this);
+            lbl.setText(names[i] + " " + values[i] + "%");
+            lbl.setTextColor(Theme.TEXT_SOFT);
+            lbl.setTextSize(13);
+            line.addView(lbl, new LinearLayout.LayoutParams(dp(86), dp(40)));
+            SeekBar seek = new SeekBar(this);
+            seek.setMax(45);
+            seek.setProgress(values[i]);
+            seek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+                @Override public void onProgressChanged(SeekBar bar, int progress, boolean user) {
+                    values[idx] = progress;
+                    if (values[0] + values[2] > 85) values[idx] = 85 - values[idx == 0 ? 2 : 0];
+                    if (values[1] + values[3] > 85) values[idx] = 85 - values[idx == 1 ? 3 : 1];
+                    if (values[idx] != progress) { bar.setProgress(values[idx]); return; }
+                    lbl.setText(names[idx] + " " + values[idx] + "%");
+                    canvasView.setSelectedCrop(values[0] / 100f, values[1] / 100f, values[2] / 100f, values[3] / 100f);
+                }
+                @Override public void onStartTrackingTouch(SeekBar bar) {}
+                @Override public void onStopTrackingTouch(SeekBar bar) {}
+            });
+            line.addView(seek, new LinearLayout.LayoutParams(0, dp(40), 1f));
+            panel.addView(line);
+        }
+        LinearLayout actions = new LinearLayout(this);
+        actions.setGravity(Gravity.END);
+        actions.setPadding(0, dp(6), 0, 0);
+        Button cancel = textButton("Cancel", false);
+        cropCancel = () -> {
+            canvasView.setSelectedCrop(original[0], original[1], original[2], original[3]);
+            undo.pollFirst();
+            closeCrop();
+        };
+        cancel.setOnClickListener(v -> cropCancel.run());
+        Button reset = textButton("Reset", false);
+        reset.setOnClickListener(v -> {
+            canvasView.setSelectedCrop(0f, 0f, 0f, 0f);
+            redo.clear();
+            closeCrop();
+        });
+        Button done = textButton("Apply", true);
+        done.setOnClickListener(v -> {
+            redo.clear();
+            Diagnostics.log("INLINE_CROP_APPLIED", "crop adjusted on page");
+            closeCrop();
+        });
+        actions.addView(cancel); actions.addView(reset); actions.addView(done);
+        panel.addView(actions);
+        FrameLayout.LayoutParams p = new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        if (railLayout) p.width = Math.min(dp(520), getResources().getDisplayMetrics().widthPixels);
+        scrim.addView(panel, p);
+        canvasHost.addView(scrim, new FrameLayout.LayoutParams(-1, -1));
+        Diagnostics.log("INLINE_CROP_OPENED", "editor stays in place");
+    }
+
+    private void closeCrop() {
+        if (cropOverlay != null) canvasHost.removeView(cropOverlay);
+        cropOverlay = null;
+        cropCancel = null;
+        canvasView.fitPage();
+        updateControls();
+    }
+
+    private void confirmClear() {
+        if (canvasView.getItemCount() == 0) return;
+        dialog().setTitle("Clear the page?")
+                .setMessage("Removes every picture, including ones off the page. You can undo right after.")
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Clear", (d, w) -> {
+                    pushUndo();
+                    canvasView.clearAll();
+                    redo.clear();
+                    showUndoBar("Page cleared");
+                    updateControls();
+                })
+                .show();
+    }
+
+    private void showAbout() {
+        dialog().setTitle("LabelSheet 1.9")
+                .setMessage("Letter page: 8.5 × 11 in.\n\n"
+                        + "• Add places pictures on the page. Tap a picture to see its tools.\n"
+                        + "• Drag to move. Corner handles keep proportions; side handles stretch one way.\n"
+                        + "• Off page moves a picture into the grey side area (or just drag it there). Anything outside the page is NOT printed — handy for labels you'll use later. Tap On page to bring it back.\n"
+                        + "• Pictures crossing the page edge get an orange outline and will be cut off when printed.\n"
+                        + "• Select lets you pick several pictures to align, space, border, size or delete together.\n"
+                        + "• Pinch or use − / + to zoom. Tap the % to fit everything.\n\n"
+                        + "Printing: Print wakes the " + DEFAULT_PRINTER_NAME + " (searching 192.168.58.100–110) before opening Android printing. Long-press Print for printer settings. Keep scaling at 100% / Actual size for exact label sizes.\n\n"
+                        + "Troubleshooting: ⋮ → Troubleshooting → Copy diagnostic log. The log records actions and errors, never your label images.")
+                .setPositiveButton("OK", null)
+                .show();
+    }
+
+    // ───────────────────────────── Images ─────────────────────────────
 
     private void chooseImage(boolean replace) {
         Intent i;
@@ -578,41 +959,20 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
                 int added = 0;
                 if (data.getClipData() != null) {
                     for (int i = 0; i < data.getClipData().getItemCount(); i++) {
-                        Uri source = data.getClipData().getItemAt(i).getUri();
-                        Uri local = copyImageToPrivateStorage(source);
+                        Uri local = copyImageToPrivateStorage(data.getClipData().getItemAt(i).getUri());
                         if (local != null && canvasView.addImage(local)) added++;
                     }
                 } else if (uri != null) {
                     Uri local = copyImageToPrivateStorage(uri);
                     if (local != null && canvasView.addImage(local)) added++;
                 }
-                if (added == 0) {
-                    undo.pollFirst();
-                    showToast("I couldn't open that image. Try another screenshot.");
-                } else {
-                    redo.clear();
-                    if (added > 1) showToast(added + " labels added.");
-                }
+                if (added == 0) { undo.pollFirst(); showToast("I couldn't open that image. Try another screenshot."); }
+                else { redo.clear(); if (added > 1) showToast(added + " pictures added."); }
             } else if (requestCode == REQ_REPLACE && uri != null) {
                 pushUndo();
                 Uri local = copyImageToPrivateStorage(uri);
-                if (local == null || !canvasView.replaceSelected(local)) {
-                    undo.pollFirst();
-                    showToast("I couldn't replace that label image.");
-                } else redo.clear();
-            } else if (requestCode == REQ_CROP) {
-                float left = data.getFloatExtra("cropLeft", 0f);
-                float top = data.getFloatExtra("cropTop", 0f);
-                float right = data.getFloatExtra("cropRight", 0f);
-                float bottom = data.getFloatExtra("cropBottom", 0f);
-                pushUndo();
-                if (canvasView.setSelectedCrop(left, top, right, bottom)) {
-                    redo.clear();
-                    Diagnostics.log("VISUAL_CROP_APPLIED", String.format(java.util.Locale.US,
-                            "l=%.3f,t=%.3f,r=%.3f,b=%.3f", left, top, right, bottom));
-                } else {
-                    undo.pollFirst();
-                }
+                if (local == null || !canvasView.replaceSelected(local)) { undo.pollFirst(); showToast("I couldn't replace that picture."); }
+                else redo.clear();
             } else if (requestCode == REQ_EXPORT_PDF && uri != null) {
                 writePdf(uri);
             } else if (requestCode == REQ_EXPORT_LOG && uri != null) {
@@ -623,8 +983,9 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
             showToast("Something went wrong. The diagnostic log captured it.");
         }
         updateControls();
-        updateStatus();
     }
+
+    // ───────────────────────────── Undo / redo ─────────────────────────────
 
     private void pushUndo() {
         if (restoringHistory) return;
@@ -642,9 +1003,9 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
         canvasView.fromJson(previous);
         restoringHistory = false;
         persist();
+        hideUndoBar();
         Diagnostics.log("UNDO", "ok");
         updateControls();
-        updateStatus();
     }
 
     private void redo() {
@@ -658,23 +1019,73 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
         persist();
         Diagnostics.log("REDO", "ok");
         updateControls();
-        updateStatus();
     }
 
+    /** Bottom snackbar with an Undo action, shown after bigger changes. */
+    private void showUndoBar(String message) {
+        hideUndoBar();
+        LinearLayout bar = new LinearLayout(this);
+        bar.setOrientation(LinearLayout.HORIZONTAL);
+        bar.setGravity(Gravity.CENTER_VERTICAL);
+        bar.setPadding(dp(16), 0, dp(4), 0);
+        bar.setBackground(pill(Theme.SNACK, 0, 12));
+        bar.setElevation(dp(6));
+        TextView t = new TextView(this);
+        t.setText(message);
+        t.setTextColor(Color.WHITE);
+        t.setTextSize(14);
+        bar.addView(t, new LinearLayout.LayoutParams(0, -2, 1f));
+        TextView action = new TextView(this);
+        action.setText("UNDO");
+        action.setTextColor(0xFF9DBBFF);
+        action.setTypeface(Typeface.DEFAULT_BOLD);
+        action.setGravity(Gravity.CENTER);
+        action.setPadding(dp(14), 0, dp(14), 0);
+        action.setBackground(ripple(10));
+        action.setClickable(true);
+        action.setOnClickListener(v -> undo());
+        bar.addView(action, new LinearLayout.LayoutParams(-2, dp(48)));
+        FrameLayout.LayoutParams p = new FrameLayout.LayoutParams(-1, dp(52), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        p.setMargins(dp(12), 0, dp(12), dp(12));
+        if (railLayout) p.width = dp(420);
+        canvasHost.addView(bar, p);
+        undoBar = bar;
+        ui.postDelayed(() -> { if (undoBar == bar) hideUndoBar(); }, 5000);
+    }
+
+    private void hideUndoBar() {
+        if (undoBar != null && canvasHost != null) canvasHost.removeView(undoBar);
+        undoBar = null;
+    }
+
+    // ───────────────────────────── Printing ─────────────────────────────
+
     private void printSheet() {
-        if (canvasView.getItemCount() == 0) {
-            showToast("Add at least one label first.");
+        if (canvasView.getItemCount() == 0) { showToast("Add at least one picture first."); return; }
+        if (canvasView.getOnPageCount() == 0) {
+            showToast("Everything is off the page. Move a picture onto the page to print it.");
             return;
         }
-        if (printPreparing) {
-            showToast("Printer is already being prepared…");
+        int crossing = canvasView.getCrossingEdgeCount();
+        if (crossing > 0) {
+            dialog().setTitle("Some labels will be cut off")
+                    .setMessage(crossing + (crossing == 1 ? " picture crosses" : " pictures cross")
+                            + " the page edge (orange outline). The part outside the page won't print.")
+                    .setNegativeButton("Fix first", null)
+                    .setPositiveButton("Print anyway", (d, w) -> startPrintPreflight())
+                    .show();
             return;
         }
+        startPrintPreflight();
+    }
+
+    private void startPrintPreflight() {
+        if (printPreparing) { showToast("Printer is already being prepared…"); return; }
         printPreparing = true;
         SharedPreferences prefs = getSharedPreferences("printer", MODE_PRIVATE);
         final String preferred = prefs.getString("host", DEFAULT_PRINTER_HOST);
         Diagnostics.log("PRINT_PREFLIGHT_STARTED", "preferred=" + PrinterWake.normalizeHost(preferred) + ", scan=192.168.58.100-110");
-        showToast("Finding and waking Canon printer…");
+        showToast("Waking the printer…");
         new Thread(() -> {
             final PrinterWake.Result result = PrinterWake.reconnectForPrint(preferred, prefs.getBoolean("aggressive_reconnect", true));
             if (result != null && !result.host.equals(PrinterWake.normalizeHost(preferred))) {
@@ -684,22 +1095,13 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
             runOnUiThread(() -> {
                 if (result != null) {
                     Diagnostics.log("PRINT_SERVICE_REACHABLE", "host=" + result.host + ", port=" + result.port +
-                            (result.discovered ? ", discovered=true" : "") +
-                            "; physical print outcome is not yet known");
-                    updateStatus();
-                    showToast("Printer network service responding at " + result.host + ". Opening Android print…");
+                            (result.discovered ? ", discovered=true" : "") + "; physical print outcome is not yet known");
                     // Give Android's print service a moment to rediscover a printer whose DHCP address changed.
-                    canvasView.postDelayed(() -> {
-                        printPreparing = false;
-                        openSystemPrintDialog(result.host);
-                    }, 1200);
+                    canvasView.postDelayed(() -> { printPreparing = false; openSystemPrintDialog(result.host); }, 1200);
                 } else {
                     Diagnostics.log("PRINT_PRINTER_NOT_FOUND", "searched=192.168.58.100-110; falling back to Android print service");
-                    showToast("Printer still not responding. Check Canon Auto Power On, or choose it in Android Print.");
-                    canvasView.postDelayed(() -> {
-                        printPreparing = false;
-                        openSystemPrintDialog(null);
-                    }, 500);
+                    showToast("Printer didn't answer. Opening Android printing anyway.");
+                    canvasView.postDelayed(() -> { printPreparing = false; openSystemPrintDialog(null); }, 500);
                 }
             });
         }).start();
@@ -720,23 +1122,20 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
                     .setColorMode(PrintAttributes.COLOR_MODE_COLOR)
                     .setMinMargins(PrintAttributes.Margins.NO_MARGINS)
                     .build();
-            Diagnostics.log("PRINT_STARTED", "labels=" + canvasView.getItemCount() + ", orientation=" +
-                    (canvasView.isPortrait() ? "portrait" : "landscape") +
-                    (discoveredHost == null ? "" : ", printer=" + discoveredHost));
+            Diagnostics.log("PRINT_STARTED", "labels=" + canvasView.getOnPageCount() + ", aside=" + canvasView.getOffPageCount()
+                    + ", orientation=" + (canvasView.isPortrait() ? "portrait" : "landscape")
+                    + (discoveredHost == null ? "" : ", printer=" + discoveredHost));
             pm.print("LabelSheet - Letter", new SheetPrintAdapter(), attrs);
         } catch (Exception e) {
             Diagnostics.error("PRINT_START_FAILED", e);
-            showToast("Print couldn't start. Export the diagnostic log if it keeps happening.");
+            showToast("Print couldn't start. Save the diagnostic log if it keeps happening.");
         }
     }
 
     private final class SheetPrintAdapter extends PrintDocumentAdapter {
         @Override public void onLayout(PrintAttributes oldAttributes, PrintAttributes newAttributes,
                                        CancellationSignal cancellationSignal, LayoutResultCallback callback, Bundle extras) {
-            if (cancellationSignal.isCanceled()) {
-                callback.onLayoutCancelled();
-                return;
-            }
+            if (cancellationSignal.isCanceled()) { callback.onLayoutCancelled(); return; }
             PrintDocumentInfo info = new PrintDocumentInfo.Builder("LabelSheet-Letter.pdf")
                     .setContentType(PrintDocumentInfo.CONTENT_TYPE_DOCUMENT)
                     .setPageCount(1)
@@ -748,14 +1147,9 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
                                       CancellationSignal cancellationSignal, WriteResultCallback callback) {
             PdfDocument doc = null;
             try {
-                if (cancellationSignal.isCanceled()) {
-                    callback.onWriteCancelled();
-                    return;
-                }
+                if (cancellationSignal.isCanceled()) { callback.onWriteCancelled(); return; }
                 doc = createPdfDocument();
-                try (FileOutputStream out = new FileOutputStream(destination.getFileDescriptor())) {
-                    doc.writeTo(out);
-                }
+                try (FileOutputStream out = new FileOutputStream(destination.getFileDescriptor())) { doc.writeTo(out); }
                 Diagnostics.log("PRINT_PDF_READY", "one Letter page generated successfully");
                 callback.onWriteFinished(new PageRange[]{PageRange.ALL_PAGES});
             } catch (Exception e) {
@@ -766,9 +1160,7 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
             }
         }
 
-        @Override public void onFinish() {
-            Diagnostics.log("PRINT_HANDOFF_FINISHED", "Android print dialog/process finished");
-        }
+        @Override public void onFinish() { Diagnostics.log("PRINT_HANDOFF_FINISHED", "Android print dialog/process finished"); }
     }
 
     private PdfDocument createPdfDocument() {
@@ -784,10 +1176,7 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
     }
 
     private void exportPdf() {
-        if (canvasView.getItemCount() == 0) {
-            showToast("Add at least one label first.");
-            return;
-        }
+        if (canvasView.getOnPageCount() == 0) { showToast("Put at least one picture on the page first."); return; }
         Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
         i.addCategory(Intent.CATEGORY_OPENABLE);
         i.setType("application/pdf");
@@ -805,7 +1194,7 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
                 doc.writeTo(out);
             }
             Diagnostics.log("PDF_EXPORTED", "Letter PDF exported successfully");
-            showToast("PDF exported.");
+            showToast("PDF saved.");
         } catch (Exception e) {
             Diagnostics.error("PDF_EXPORT_FAILED", e);
             showToast("PDF export failed. The log captured the error.");
@@ -814,12 +1203,14 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
         }
     }
 
+    // ───────────────────────────── Diagnostics ─────────────────────────────
+
     private void copyLog() {
         try {
             ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
             cm.setPrimaryClip(ClipData.newPlainText("LabelSheet diagnostic log", Diagnostics.read()));
             Diagnostics.log("LOG_COPIED", "diagnostic log copied to clipboard");
-            showToast("Diagnostic log copied. You can paste it into ChatGPT.");
+            showToast("Diagnostic log copied.");
         } catch (Exception e) {
             Diagnostics.error("LOG_COPY_FAILED", e);
             showToast("Couldn't copy the log.");
@@ -841,286 +1232,14 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
             out.write(text.getBytes(java.nio.charset.StandardCharsets.UTF_8));
             out.flush();
             Diagnostics.log(event, "success");
-            showToast("Diagnostic log exported.");
+            showToast("Diagnostic log saved.");
         } catch (Exception e) {
             Diagnostics.error("LOG_EXPORT_FAILED", e);
-            showToast("Couldn't export the diagnostic log.");
+            showToast("Couldn't save the diagnostic log.");
         }
     }
 
-    private void confirmClear() {
-        if (canvasView.getItemCount() == 0) return;
-        new AlertDialog.Builder(this)
-                .setTitle("Clear this sheet?")
-                .setMessage("All labels on the current page will be removed. You can still use Undo immediately afterward.")
-                .setNegativeButton("Cancel", null)
-                .setPositiveButton("Clear", (d, w) -> {
-                    pushUndo();
-                    canvasView.clearAll();
-                    redo.clear();
-                    updateControls();
-                })
-                .show();
-    }
-
-    private void showAbout() {
-        new AlertDialog.Builder(this)
-                .setTitle("LabelSheet 1.6.0")
-                .setMessage("Letter page: 8.5 × 11 inches.\n\nLandscape phone view puts the tool rail on the left and the canvas on the right. Pinch with two fingers to zoom the canvas; use − / Fit / + for button zoom. Drag blank canvas space to pan while zoomed.\n\nPicture editing: corner handles resize proportionally; side handles change width or height only. Tap Border for the standard 2 pt border; long-press Border for manual thickness. Copy Fmt / Paste Fmt copies size, crop, rotation and border without copying the picture or position.\n\nTurn on Multi to select several pictures, then Layout for alignment, even spacing, exact size, nudge, layers, duplicate/fill-sheet and templates. Lock prevents accidental movement or editing. Smart teal guides still snap pictures to page and picture edges/centers.\n\nFor troubleshooting: More → Copy Diagnostic Log, then paste the log into ChatGPT. The log records app actions and errors, not the pixels inside your label images.\n\nWake Printer: Canon TS6500 series is auto-discovered in 192.168.58.100–110, and background keep-awake defaults to every 3 hours.\n\nTip: if a printer driver offers scaling, keep it at 100% / Actual Size when exact label dimensions matter.")
-                .setPositiveButton("OK", null)
-                .show();
-    }
-
-    private Button makeButton(String text, boolean primary) {
-        Button b = new Button(this);
-        b.setText(text);
-        b.setTextSize(12);
-        b.setAllCaps(false);
-        b.setTextColor(0xFF203456);
-        b.setGravity(Gravity.CENTER);
-        b.setMinHeight(0);
-        b.setMinWidth(0);
-        b.setPadding(dp(14), dp(8), dp(14), dp(8));
-        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(40));
-        p.setMargins(dp(4), 0, dp(4), 0);
-        b.setLayoutParams(p);
-        applyButtonBackground(b, primary ? 0xFF2563EB : 0xFFFFFFFF, true);
-        attachUsageTracking(b);
-        return b;
-    }
-
-    private Button makeCompactButton(String text, boolean primary) {
-        Button b = new Button(this);
-        b.setText(text);
-        b.setTextSize(12);
-        b.setAllCaps(false);
-        b.setTextColor(0xFF203456);
-        b.setGravity(Gravity.CENTER);
-        b.setMinHeight(0);
-        b.setMinWidth(0);
-        b.setPadding(dp(2), 0, dp(2), 0);
-        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f);
-        p.setMargins(dp(2), 0, dp(2), 0);
-        b.setLayoutParams(p);
-        applyButtonBackground(b, primary ? 0xFF2563EB : 0xFFFFFFFF, true);
-        attachUsageTracking(b);
-        return b;
-    }
-
-    private void showBorderDialog() {
-        if (!canvasView.hasSelection()) return;
-        float current = canvasView.getSelectedBorderPt();
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(dp(22), dp(8), dp(22), 0);
-        TextView value = new TextView(this);
-        value.setTextColor(Color.DKGRAY);
-        value.setTextSize(15);
-        value.setText(String.format(java.util.Locale.US, "Thickness: %.0f pt", current));
-        SeekBar seek = new SeekBar(this);
-        seek.setMax(24);
-        seek.setProgress(Math.round(current));
-        seek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-            @Override public void onProgressChanged(SeekBar s, int progress, boolean fromUser) {
-                value.setText(progress == 0 ? "Border: Off" : "Thickness: " + progress + " pt");
-            }
-            @Override public void onStartTrackingTouch(SeekBar s) { }
-            @Override public void onStopTrackingTouch(SeekBar s) { }
-        });
-        box.addView(value);
-        box.addView(seek);
-        new AlertDialog.Builder(this)
-                .setTitle("Picture border")
-                .setMessage("Black outline. Set thickness to 0 to remove it.")
-                .setView(box)
-                .setNegativeButton("Cancel", null)
-                .setPositiveButton("Apply", (d, w) -> {
-                    pushUndo();
-                    canvasView.setSelectedBorderPt(seek.getProgress());
-                    redo.clear();
-                    updateControls();
-                })
-                .show();
-    }
-
-
-    /** Live crop overlay: no new activity, screen rotation or canvas layout resize. */
-    private void showInlineCrop() {
-        if (!canvasView.hasSelection() || canvasView.isSelectedLocked()) {
-            showToast("Select an unlocked label first."); return;
-        }
-        if (cropOverlay != null) return;
-        final float[] original = canvasView.getSelectedCrop();
-        final int[] values = new int[] {
-                Math.round(original[0] * 100f), Math.round(original[1] * 100f),
-                Math.round(original[2] * 100f), Math.round(original[3] * 100f)
-        };
-        pushUndo();
-
-        FrameLayout scrim = new FrameLayout(this);
-        scrim.setClickable(true);
-        scrim.setBackgroundColor(0x44000000);
-        cropOverlay = scrim;
-        LinearLayout panel = new LinearLayout(this);
-        panel.setOrientation(LinearLayout.VERTICAL);
-        panel.setPadding(dp(14), dp(10), dp(14), dp(8));
-        GradientDrawable background = new GradientDrawable();
-        background.setColor(0xFFFAFCFF);
-        background.setCornerRadii(new float[]{dp(18),dp(18),dp(18),dp(18),0,0,0,0});
-        panel.setBackground(background);
-
-        TextView title = new TextView(this);
-        title.setText("Crop label  •  adjust edges below");
-        title.setTextColor(0xFF1F3458);
-        title.setTextSize(16);
-        title.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
-        panel.addView(title);
-        String[] names = new String[]{"Left", "Top", "Right", "Bottom"};
-        for (int i = 0; i < 4; i++) {
-            final int idx = i;
-            LinearLayout line = new LinearLayout(this);
-            line.setOrientation(LinearLayout.HORIZONTAL);
-            line.setGravity(Gravity.CENTER_VERTICAL);
-            TextView label = new TextView(this);
-            label.setText(names[i] + " " + values[i] + "%");
-            label.setTextColor(0xFF33496F);
-            label.setTextSize(12);
-            line.addView(label, new LinearLayout.LayoutParams(dp(84), dp(36)));
-            SeekBar seek = new SeekBar(this);
-            seek.setMax(45);
-            seek.setProgress(values[i]);
-            seek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-                @Override public void onProgressChanged(SeekBar bar, int progress, boolean user) {
-                    values[idx] = progress;
-                    if (values[0] + values[2] > 85) values[idx] = 85 - values[idx == 0 ? 2 : 0];
-                    if (values[1] + values[3] > 85) values[idx] = 85 - values[idx == 1 ? 3 : 1];
-                    if (values[idx] != progress) { bar.setProgress(values[idx]); return; }
-                    label.setText(names[idx] + " " + values[idx] + "%");
-                    canvasView.setSelectedCrop(values[0]/100f, values[1]/100f,
-                            values[2]/100f, values[3]/100f);
-                }
-                @Override public void onStartTrackingTouch(SeekBar bar) {}
-                @Override public void onStopTrackingTouch(SeekBar bar) {}
-            });
-            line.addView(seek, new LinearLayout.LayoutParams(0, dp(36), 1f));
-            panel.addView(line);
-        }
-        LinearLayout actions = new LinearLayout(this);
-        actions.setGravity(Gravity.END);
-        Button cancel = makeButton("Cancel", false);
-        cancel.setOnClickListener(v -> {
-            canvasView.setSelectedCrop(original[0],original[1],original[2],original[3]);
-            undo.pollFirst();
-            canvasHost.removeView(scrim);
-            cropOverlay = null;
-            updateControls();
-        });
-        Button reset = makeButton("Reset", false);
-        reset.setOnClickListener(v -> {
-            canvasView.setSelectedCrop(0f,0f,0f,0f);
-            canvasHost.removeView(scrim);
-            cropOverlay = null;
-            redo.clear();
-            updateControls();
-        });
-        Button done = makeButton("Apply", true);
-        done.setOnClickListener(v -> {
-            redo.clear();
-            Diagnostics.log("INLINE_CROP_APPLIED", "crop adjusted on page");
-            canvasHost.removeView(scrim);
-            cropOverlay = null;
-            updateControls();
-        });
-        actions.addView(cancel); actions.addView(reset); actions.addView(done);
-        panel.addView(actions);
-        FrameLayout.LayoutParams p = new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM);
-        scrim.addView(panel, p);
-        canvasHost.addView(scrim, new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
-        Diagnostics.log("INLINE_CROP_OPENED", "editor stays in place");
-    }
-
-    private void launchVisualCrop() {
-        if (canvasView == null || !canvasView.hasSelection()) return;
-        Uri selectedUri = canvasView.getSelectedUri();
-        if (selectedUri == null) {
-            showToast("I couldn't open that picture for cropping.");
-            return;
-        }
-        float[] crop = canvasView.getSelectedCrop();
-        Intent i = new Intent(this, CropActivity.class);
-        i.putExtra("imageUri", selectedUri.toString());
-        i.putExtra("cropLeft", crop[0]);
-        i.putExtra("cropTop", crop[1]);
-        i.putExtra("cropRight", crop[2]);
-        i.putExtra("cropBottom", crop[3]);
-        Diagnostics.log("VISUAL_CROP_OPENED", "selected picture");
-        startActivityForResult(i, REQ_CROP);
-    }
-
-    private void showCropDialog() {
-        if (!canvasView.hasSelection()) return;
-        float[] original = canvasView.getSelectedCrop();
-        final int[] v = new int[]{Math.round(original[0] * 100f), Math.round(original[1] * 100f),
-                Math.round(original[2] * 100f), Math.round(original[3] * 100f)};
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(dp(22), dp(6), dp(22), 0);
-        addCropSlider(box, "Left", 0, v);
-        addCropSlider(box, "Top", 1, v);
-        addCropSlider(box, "Right", 2, v);
-        addCropSlider(box, "Bottom", 3, v);
-        AlertDialog dialog = new AlertDialog.Builder(this)
-                .setTitle("Crop selected picture")
-                .setMessage("Move the four sliders to trim the edges. Maximum trim per edge is 45%.")
-                .setView(box)
-                .setNegativeButton("Cancel", null)
-                .setNeutralButton("Reset", null)
-                .setPositiveButton("Apply", null)
-                .create();
-        dialog.setOnShowListener(x -> {
-            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(vw -> {
-                if (v[0] + v[2] > 85 || v[1] + v[3] > 85) {
-                    showToast("Crop is too tight. Leave at least 15% of the picture.");
-                    return;
-                }
-                pushUndo();
-                canvasView.setSelectedCrop(v[0] / 100f, v[1] / 100f, v[2] / 100f, v[3] / 100f);
-                redo.clear();
-                dialog.dismiss();
-                updateControls();
-            });
-            dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(vw -> {
-                pushUndo();
-                canvasView.setSelectedCrop(0f, 0f, 0f, 0f);
-                redo.clear();
-                dialog.dismiss();
-                updateControls();
-            });
-        });
-        dialog.show();
-    }
-
-    private void addCropSlider(LinearLayout box, String name, int index, int[] values) {
-        TextView label = new TextView(this);
-        label.setTextColor(Color.DKGRAY);
-        label.setTextSize(13);
-        label.setText(name + ": " + values[index] + "%");
-        SeekBar seek = new SeekBar(this);
-        seek.setMax(45);
-        seek.setProgress(values[index]);
-        seek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-            @Override public void onProgressChanged(SeekBar s, int progress, boolean fromUser) {
-                values[index] = progress;
-                label.setText(name + ": " + progress + "%");
-            }
-            @Override public void onStartTrackingTouch(SeekBar s) { }
-            @Override public void onStopTrackingTouch(SeekBar s) { }
-        });
-        box.addView(label);
-        box.addView(seek);
-    }
+    // ───────────────────────────── Printer wake ─────────────────────────────
 
     private void initializePrinterDefaults() {
         SharedPreferences prefs = getSharedPreferences("printer", MODE_PRIVATE);
@@ -1130,7 +1249,7 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
         if (!prefs.contains("printer_name")) { e.putString("printer_name", DEFAULT_PRINTER_NAME); changed = true; }
         if (!prefs.contains("keep_alive_enabled")) { e.putBoolean("keep_alive_enabled", true); changed = true; }
         if (!prefs.getBoolean("v14_printer_defaults", false)) {
-            // v1.4 changes the requested default from 15 minutes to 3 hours, including upgrades from older builds.
+            // v1.4 changed the default from 15 minutes to 3 hours, including upgrades from older builds.
             e.putInt("interval_minutes", DEFAULT_KEEPALIVE_MINUTES);
             e.putBoolean("v14_printer_defaults", true);
             changed = true;
@@ -1147,7 +1266,7 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
     private void wakePrinter() {
         SharedPreferences prefs = getSharedPreferences("printer", MODE_PRIVATE);
         String preferred = prefs.getString("host", DEFAULT_PRINTER_HOST).trim();
-        showToast("Finding Canon printer on 192.168.58.100–110…");
+        showToast("Looking for the printer…");
         Diagnostics.log("PRINTER_WAKE_STARTED", "preferred=" + PrinterWake.normalizeHost(preferred) + ", scan=192.168.58.100-110");
         new Thread(() -> {
             final PrinterWake.Result result = PrinterWake.reconnectForPrint(preferred, prefs.getBoolean("aggressive_reconnect", true));
@@ -1158,96 +1277,69 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
             runOnUiThread(() -> {
                 if (result != null) {
                     Diagnostics.log("PRINTER_WAKE_SUCCESS", "host=" + result.host + ", port=" + result.port + (result.discovered ? ", discovered=true" : ""));
-                    new AlertDialog.Builder(this)
-                            .setTitle("Printer connection checked")
-                            .setMessage(result.host + "\n" + PrinterWake.serviceDescription(result) +
-                                    "\n\nThis does not confirm that a physical page will print. " +
-                                    "Check Canon Auto Power On and Auto Power Off settings if it becomes unreachable after being idle.")
-                            .setPositiveButton("Print", (d, w) -> printSheet())
+                    dialog().setTitle("Printer found")
+                            .setMessage(DEFAULT_PRINTER_NAME + "\n" + result.host + " • " + PrinterWake.serviceDescription(result)
+                                    + "\n\nThe printer answered on the network. If a page still doesn't come out, check Canon Auto Power On.")
+                            .setPositiveButton("Print now", (d, w) -> printSheet())
                             .setNegativeButton("Close", null).show();
-                    updateStatus();
+                    updateControls();
                 } else {
                     Diagnostics.log("PRINTER_WAKE_NO_RESPONSE", "searched=192.168.58.100-110");
-                    new AlertDialog.Builder(this)
-                            .setTitle("Printer did not respond")
-                            .setMessage("No network print service answered. Check printer power, Wi-Fi, " +
-                                    "and Canon Auto Power On. A detected IP address does not prove it can accept a job.")
-                            .setPositiveButton("Retry", (d, w) -> wakePrinter())
+                    dialog().setTitle("Printer didn't answer")
+                            .setMessage("Check that the printer is on and on the same Wi-Fi, and that Canon Auto Power On is enabled.")
+                            .setPositiveButton("Try again", (d, w) -> wakePrinter())
                             .setNegativeButton("Close", null).show();
                 }
             });
         }).start();
     }
 
-    private void showPrinterSettingsDialog(boolean wakeAfterSave) {
+    private void showPrinterSettingsDialog() {
         SharedPreferences prefs = getSharedPreferences("printer", MODE_PRIVATE);
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
         box.setPadding(dp(22), dp(6), dp(22), 0);
 
-        TextView hostLabel = new TextView(this);
-        hostLabel.setText("Last detected printer IP (auto-search range: 192.168.58.100–110)");
-        hostLabel.setTextColor(Color.DKGRAY);
-        hostLabel.setTextSize(13);
-        box.addView(hostLabel);
-
+        box.addView(label(DEFAULT_PRINTER_NAME + " — last address found (auto-search 192.168.58.100–110)"));
         EditText hostInput = new EditText(this);
         hostInput.setSingleLine(true);
-        hostInput.setHint("Auto-detected after Wake / background scan");
         hostInput.setText(prefs.getString("host", DEFAULT_PRINTER_HOST));
         hostInput.setSelectAllOnFocus(true);
-        box.addView(hostInput, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+        box.addView(hostInput, new LinearLayout.LayoutParams(-1, -2));
 
         CheckBox keepAlive = new CheckBox(this);
         keepAlive.setText("Keep printer awake in the background");
-        keepAlive.setTextColor(Color.DKGRAY);
         keepAlive.setChecked(prefs.getBoolean("keep_alive_enabled", true));
         box.addView(keepAlive);
 
         CheckBox aggressive = new CheckBox(this);
-        aggressive.setText("Aggressive reconnect: retry network service before printing");
-        aggressive.setTextColor(Color.DKGRAY);
+        aggressive.setText("Retry the connection a few times before printing");
         aggressive.setChecked(prefs.getBoolean("aggressive_reconnect", true));
         box.addView(aggressive);
 
-        TextView intervalLabel = new TextView(this);
-        intervalLabel.setText("Wake interval in minutes (default 180 = 3 hours; minimum 15)");
-        intervalLabel.setTextColor(Color.DKGRAY);
-        intervalLabel.setTextSize(13);
-        box.addView(intervalLabel);
-
+        box.addView(label("Wake every (minutes, minimum 15; 180 = 3 hours)"));
         EditText intervalInput = new EditText(this);
         intervalInput.setSingleLine(true);
         intervalInput.setInputType(InputType.TYPE_CLASS_NUMBER);
         intervalInput.setText(String.valueOf(Math.max(15, prefs.getInt("interval_minutes", DEFAULT_KEEPALIVE_MINUTES))));
-        box.addView(intervalInput, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+        box.addView(intervalInput, new LinearLayout.LayoutParams(-1, -2));
 
-        TextView note = new TextView(this);
-        note.setText("Aggressive mode makes a few bounded reconnection attempts before scanning. " +
-                "Background checks are Android scheduled and may be delayed by battery saving. " +
-                "Canon Auto Power On must be enabled on compatible printers to accept wake-on-print. " +
-                "A reachable IP does not guarantee that a job is printed.");
-        note.setTextColor(0xFF666666);
-        note.setTextSize(12);
-        note.setPadding(0, dp(8), 0, 0);
+        TextView note = label("Android may delay background checks to save battery. A reachable address doesn't guarantee a page prints.");
+        note.setTextSize(11.5f);
         box.addView(note);
 
-        AlertDialog dialog = new AlertDialog.Builder(this)
-                .setTitle("Printer wake settings")
+        AlertDialog dlg = dialog()
+                .setTitle("Printer settings")
                 .setView(box)
                 .setNegativeButton("Cancel", null)
                 .setPositiveButton("Save", null)
                 .create();
-        dialog.setOnShowListener(x -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+        dlg.setOnShowListener(x -> dlg.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
             String host = hostInput.getText().toString().trim();
             int minutes = 15;
-            try { minutes = Integer.parseInt(intervalInput.getText().toString().trim()); }
-            catch (Exception ignored) { }
+            try { minutes = Integer.parseInt(intervalInput.getText().toString().trim()); } catch (Exception ignored) { }
             if (host.isEmpty()) host = DEFAULT_PRINTER_HOST;
-            if (minutes < 15) {
-                minutes = 15;
-                showToast("Android's minimum background interval is 15 minutes, so I set it to 15.");
-            }
+            if (minutes < 15) { minutes = 15; showToast("Android's minimum background interval is 15 minutes, so I set it to 15."); }
             if (minutes > 1440) minutes = 1440;
             prefs.edit()
                     .putString("host", host)
@@ -1256,115 +1348,73 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
                     .putInt("interval_minutes", minutes)
                     .apply();
             Diagnostics.log("PRINTER_SETTINGS_SAVED", "host=" + PrinterWake.normalizeHost(host) + ", keepAlive=" + keepAlive.isChecked() + ", interval=" + minutes);
-            schedulePrinterKeepAlive(keepAlive.isChecked(), minutes);
-            dialog.dismiss();
-            if (wakeAfterSave) wakePrinter();
+            schedulePrinterKeepAlive(keepAlive.isChecked(), minutes, true);
+            dlg.dismiss();
         }));
-        dialog.show();
+        dlg.show();
     }
 
     private void restorePrinterKeepAliveSchedule() {
         SharedPreferences prefs = getSharedPreferences("printer", MODE_PRIVATE);
         if (prefs.getBoolean("keep_alive_enabled", true)) {
-            schedulePrinterKeepAlive(true, Math.max(15, prefs.getInt("interval_minutes", DEFAULT_KEEPALIVE_MINUTES)));
+            schedulePrinterKeepAlive(true, Math.max(15, prefs.getInt("interval_minutes", DEFAULT_KEEPALIVE_MINUTES)), false);
         }
     }
 
-    private void schedulePrinterKeepAlive(boolean enabled, int minutes) {
+    /** @param announce show a toast; false on app start so opening the app isn't noisy. */
+    private void schedulePrinterKeepAlive(boolean enabled, int minutes, boolean announce) {
         JobScheduler scheduler = (JobScheduler) getSystemService(Context.JOB_SCHEDULER_SERVICE);
-        if (scheduler == null) {
-            Diagnostics.log("PRINTER_KEEPALIVE_SCHEDULE_FAILED", "JobScheduler unavailable");
-            return;
-        }
+        if (scheduler == null) { Diagnostics.log("PRINTER_KEEPALIVE_SCHEDULE_FAILED", "JobScheduler unavailable"); return; }
         scheduler.cancel(PRINTER_KEEPALIVE_JOB_ID);
         if (!enabled) {
             Diagnostics.log("PRINTER_KEEPALIVE_DISABLED", "scheduled job cancelled");
-            showToast("Automatic printer keep-awake is off.");
+            if (announce) showToast("Automatic printer keep-awake is off.");
             return;
         }
-        long intervalMs = Math.max(15, minutes) * 60_000L;
+        int actual = Math.max(15, minutes);
         JobInfo job = new JobInfo.Builder(PRINTER_KEEPALIVE_JOB_ID, new ComponentName(this, PrinterKeepAliveService.class))
                 .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
-                .setPeriodic(intervalMs)
+                .setPeriodic(actual * 60_000L)
                 .setPersisted(true)
                 .build();
         int result = scheduler.schedule(job);
-        Diagnostics.log("PRINTER_KEEPALIVE_SCHEDULED", "minutes=" + Math.max(15, minutes) + ", result=" + result);
-        if (result == JobScheduler.RESULT_SUCCESS) {
-            int actual = Math.max(15, minutes);
-            if (actual % 60 == 0) showToast("Printer keep-awake set for about every " + (actual / 60) + " hour" + ((actual / 60) == 1 ? "" : "s") + ".");
-            else showToast("Printer keep-awake set for about every " + actual + " minutes.");
+        Diagnostics.log("PRINTER_KEEPALIVE_SCHEDULED", "minutes=" + actual + ", result=" + result);
+        if (result != JobScheduler.RESULT_SUCCESS) showToast("Android could not schedule printer keep-awake. Check the diagnostic log.");
+        else if (announce) {
+            if (actual % 60 == 0) showToast("Printer keep-awake: about every " + (actual / 60) + " hour" + ((actual / 60) == 1 ? "" : "s") + ".");
+            else showToast("Printer keep-awake: about every " + actual + " minutes.");
         }
-        else showToast("Android could not schedule printer keep-awake. Check the diagnostic log.");
     }
 
-    private void attachUsageTracking(Button b) {
-        b.setOnTouchListener((view, event) -> {
-            if (event.getActionMasked() == MotionEvent.ACTION_UP && view.isEnabled()
-                    && event.getX() >= 0 && event.getX() < view.getWidth()
-                    && event.getY() >= 0 && event.getY() < view.getHeight()) {
-                UsageInsights.record(getApplicationContext(), b.getText().toString());
-            }
-            return false;
-        });
-    }
-
-    private void applyButtonBackground(Button b, int color, boolean enabled) {
-        GradientDrawable gd = new GradientDrawable();
-        boolean primary = color == 0xFF2563EB || color == 0xFF19B5A5 || color == 0xFF168F84;
-        gd.setColor(enabled ? (primary ? 0xFF2563EB : 0xFFFFFFFF) : 0xFFE5EAF4);
-        gd.setCornerRadius(dp(11));
-        gd.setStroke(dp(1), enabled ? (primary ? 0xFF2563EB : 0xFFCAD7E9) : 0xFFD2DEED);
-        b.setTextColor(primary && enabled ? Color.WHITE : 0xFF203456);
-        b.setBackground(gd);
-        b.setAlpha(enabled ? 1f : 0.66f);
-    }
+    // ───────────────────────────── State ─────────────────────────────
 
     private void updateControls() {
         if (canvasView == null) return;
-        boolean selected = canvasView.hasSelection();
-        boolean locked = selected && canvasView.isSelectedLocked();
-        setEnabledStyled(replaceButton, selected && !locked);
-        setEnabledStyled(duplicateButton, selected);
-        setEnabledStyled(deleteButton, selected && !locked);
-        setEnabledStyled(rotateButton, selected && !locked);
-        setEnabledStyled(cropButton, selected && !locked);
-        setEnabledStyled(borderButton, selected && !locked);
-        setEnabledStyled(copyFormatButton, selected);
-        setEnabledStyled(pasteFormatButton, selected && !locked && copiedFormatJson != null);
-        setEnabledStyled(lockButton, selected);
-        if (lockButton != null) lockButton.setText(locked ? "Unlock" : "Lock");
-        if (multiButton != null) {
-            multiButton.setText(canvasView.isMultiSelectMode() ? "Multi ✓" : "Multi");
-            applyButtonBackground(multiButton, canvasView.isMultiSelectMode() ? 0xFF168F84 : 0xFFFFFFFF, true);
-        }
-        setEnabledStyled(bulkButton, canvasView.getSelectionCount() > 0);
-        setEnabledStyled(layoutButton, canvasView.getItemCount() > 0);
-        setEnabledStyled(arrangeButton, canvasView.getItemCount() > 0);
-        setEnabledStyled(undoButton, !undo.isEmpty());
-        setEnabledStyled(redoButton, !redo.isEmpty());
-        if (zoomPercentButton != null) zoomPercentButton.setText(canvasView.getZoomPercent() + "%");
+        if (undoButton != null) { undoButton.setEnabled(!undo.isEmpty()); undoButton.setAlpha(undo.isEmpty() ? 0.3f : 1f); }
+        if (redoButton != null) { redoButton.setEnabled(!redo.isEmpty()); redoButton.setAlpha(redo.isEmpty() ? 0.3f : 1f); }
+        if (zoomLabel != null) zoomLabel.setText(canvasView.getZoomPercent() + "%");
+        refreshTools();
         updateStatus();
     }
 
-    private void setEnabledStyled(Button b, boolean enabled) {
-        if (b == null) return;
-        b.setEnabled(enabled);
-        applyButtonBackground(b, 0xFFFFFFFF, enabled);
-    }
-
     private void updateStatus() {
-        if (statusText == null || canvasView == null) return;
-        String orientation = canvasView.isPortrait() ? "Portrait" : "Landscape";
-        SharedPreferences prefs = getSharedPreferences("printer", MODE_PRIVATE);
-        boolean keepAlive = prefs.getBoolean("keep_alive_enabled", true);
-        int interval = Math.max(15, prefs.getInt("interval_minutes", DEFAULT_KEEPALIVE_MINUTES));
-        String host = prefs.getString("host", DEFAULT_PRINTER_HOST);
-        String intervalText = (interval % 60 == 0) ? ((interval / 60) + "h") : (interval + "m");
-        String printerState = DEFAULT_PRINTER_NAME + " • " + host + " • " + (keepAlive ? ("Keep Awake " + intervalText + " • Auto IP") : "Keep Awake Off");
-        String selection = canvasView.getSelectionCount() > 1 ? (canvasView.getSelectionCount() + " selected") : canvasView.selectedSizeText();
-        statusText.setText(selection + "   •   " + orientation + " Letter   •   Zoom " + canvasView.getZoomPercent() + "%   •   Autosaved\n" + printerState);
-        if (zoomPercentButton != null) zoomPercentButton.setText(canvasView.getZoomPercent() + "%");
+        if (subtitle == null || canvasView == null) return;
+        String text;
+        if (canvasView.isMultiSelectMode()) {
+            int n = canvasView.getSelectionCount();
+            text = n == 0 ? "Tap pictures to select them" : n + " selected";
+        } else if (canvasView.hasSelection()) {
+            text = canvasView.selectedSizeText();
+        } else {
+            int on = canvasView.getOnPageCount(), off = canvasView.getOffPageCount();
+            StringBuilder b = new StringBuilder(canvasView.isPortrait() ? "Letter portrait" : "Letter landscape");
+            b.append(" • ").append(on).append(on == 1 ? " label" : " labels");
+            if (off > 0) b.append(" • ").append(off).append(" off page");
+            int crossing = canvasView.getCrossingEdgeCount();
+            if (crossing > 0) b.append(" • ").append(crossing).append(" cut off");
+            text = b.toString();
+        }
+        subtitle.setText(text);
     }
 
     private void persist() {
@@ -1372,9 +1422,7 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
         SheetStore.save(this, canvasView.toJson());
     }
 
-    @Override public void onSelectionChanged(boolean hasSelection) {
-        updateControls();
-    }
+    @Override public void onSelectionChanged(boolean hasSelection) { updateControls(); }
 
     @Override public void onEditStarted() {
         pushUndo();
@@ -1397,10 +1445,20 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
         Diagnostics.log("DEVICE_ROTATED", "orientation=" + newConfig.orientation);
         if (canvasView != null) {
             String sheet = canvasView.toJson();
+            cropOverlay = null;
+            cropCancel = null;
+            undoBar = null;
             setContentView(buildUi());
             canvasView.fromJson(sheet);
             updateControls();
         }
+    }
+
+    @Override public void onBackPressed() {
+        if (cropOverlay != null && cropCancel != null) { cropCancel.run(); return; }
+        if (canvasView != null && canvasView.isMultiSelectMode()) { canvasView.setMultiSelectMode(false); canvasView.clearSelection(); return; }
+        if (canvasView != null && canvasView.hasSelection()) { canvasView.clearSelection(); return; }
+        super.onBackPressed();
     }
 
     @Override protected void onNewIntent(Intent intent) {
@@ -1424,7 +1482,7 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
                 if (added > 0) {
                     redo.clear();
                     Diagnostics.log("SHARED_IMAGES_IMPORTED", "count=" + added);
-                    showToast(added + " pictures added to the sheet.");
+                    showToast(added + " pictures added to the page.");
                 } else undo.pollFirst();
                 return;
             }
@@ -1436,7 +1494,7 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
             if (local != null && canvasView.addImage(local)) {
                 redo.clear();
                 Diagnostics.log("SHARED_IMAGE_IMPORTED", "image received from Android Share menu");
-                showToast("Screenshot added to the sheet.");
+                showToast("Picture added to the page.");
             } else {
                 undo.pollFirst();
                 showToast("I couldn't import that shared image.");
@@ -1445,6 +1503,7 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
             Diagnostics.error("SHARED_IMAGE_IMPORT_FAILED", e);
             showToast("The shared image couldn't be imported. The log captured the error.");
         }
+        updateControls();
     }
 
     private Uri copyImageToPrivateStorage(Uri source) {
@@ -1469,11 +1528,58 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
         }
     }
 
-    private void showToast(String msg) {
-        Toast.makeText(this, msg, Toast.LENGTH_LONG).show();
+    // ───────────────────────────── View helpers ─────────────────────────────
+
+    private ImageButton iconButton(int icon, String description, View.OnClickListener click) {
+        ImageButton b = new ImageButton(this);
+        b.setImageResource(icon);
+        b.setImageTintList(ColorStateList.valueOf(Theme.TEXT));
+        b.setBackground(ripple(22));
+        b.setContentDescription(description);
+        b.setOnClickListener(click);
+        b.setLayoutParams(new LinearLayout.LayoutParams(dp(46), dp(46)));
+        return b;
     }
 
-    private int dp(int value) {
-        return Math.round(value * getResources().getDisplayMetrics().density);
+    private Button textButton(String text, boolean primary) {
+        Button b = new Button(this);
+        b.setText(text);
+        b.setAllCaps(false);
+        b.setTextSize(14);
+        b.setMinHeight(0); b.setMinimumHeight(0); b.setMinWidth(0); b.setMinimumWidth(0);
+        b.setStateListAnimator(null);
+        b.setTextColor(primary ? Color.WHITE : Theme.PRIMARY);
+        b.setBackground(primary ? pill(Theme.PRIMARY, 0, 22) : ripple(22));
+        b.setPadding(dp(18), 0, dp(18), 0);
+        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(-2, dp(44));
+        p.leftMargin = dp(6);
+        b.setLayoutParams(p);
+        return b;
     }
+
+    private GradientDrawable pill(int fill, int stroke, int radiusDp) {
+        GradientDrawable g = new GradientDrawable();
+        g.setColor(fill);
+        g.setCornerRadius(dp(radiusDp));
+        if (stroke != 0) g.setStroke(dp(1), stroke);
+        return g;
+    }
+
+    private RippleDrawable ripple(int radiusDp) {
+        GradientDrawable mask = new GradientDrawable();
+        mask.setColor(Color.WHITE);
+        mask.setCornerRadius(dp(radiusDp));
+        return new RippleDrawable(ColorStateList.valueOf(0x22476082), null, mask);
+    }
+
+    private View divider(boolean horizontal) {
+        View v = new View(this);
+        v.setBackgroundColor(Theme.OUTLINE);
+        v.setLayoutParams(horizontal ? new LinearLayout.LayoutParams(-1, dp(1)) : new LinearLayout.LayoutParams(dp(1), -1));
+        return v;
+    }
+
+    private void showToast(String msg) { Toast.makeText(this, msg, Toast.LENGTH_LONG).show(); }
+
+    private int dp(int value) { return Math.round(value * getResources().getDisplayMetrics().density); }
 }
