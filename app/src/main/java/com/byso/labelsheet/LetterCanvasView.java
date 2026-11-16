@@ -402,8 +402,15 @@ public class LetterCanvasView extends View {
                 if (idx < 0 || idx >= items.size()) continue;
                 SheetItem it = items.get(idx);
                 if (it.locked) continue;
-                float w = Math.min(it.w, BOARD_X - 0.1f);
-                if (w < it.w) { it.h = it.h * (w / it.w); it.w = w; }
+                // Never resize: a label must come back at the same printed size.
+                if (it.w > BOARD_X - 0.08f) {
+                    // Too wide for the side strip: park it below the page instead.
+                    it.x = 0f;
+                    it.y = 1f + 0.04f;
+                    clampToBoard(it);
+                    changed++;
+                    continue;
+                }
                 if (y + it.h > 1f + BOARD_Y) { y = 0f; x = -BOARD_X + 0.04f; }
                 it.x = x; it.y = y;
                 clampToBoard(it);
