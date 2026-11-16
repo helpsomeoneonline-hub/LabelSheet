@@ -81,8 +81,6 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
     private TextView subtitle;
     private ImageButton undoButton, redoButton;
     private TextView zoomLabel;
-    private View cropOverlay;
-    private Runnable cropCancel;
     private View undoBar;
     private String toolsKey = "";
     private View lastTile;
@@ -96,6 +94,7 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         Diagnostics.init(this);
+        Theme.load(this);
         initializePrinterDefaults();
         setContentView(buildUi());
         restorePrinterKeepAliveSchedule();
@@ -112,10 +111,11 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
         Configuration cfg = getResources().getConfiguration();
         railLayout = cfg.orientation == Configuration.ORIENTATION_LANDSCAPE || cfg.smallestScreenWidthDp >= 600;
         toolsKey = "";
+        applyWindowColors();
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(Theme.BACKGROUND);
+        root.setBackgroundColor(Theme.SURFACE);
         root.setOnApplyWindowInsetsListener((v, insets) -> {
             v.setPadding(insets.getSystemWindowInsetLeft(), insets.getSystemWindowInsetTop(),
                     insets.getSystemWindowInsetRight(), insets.getSystemWindowInsetBottom());
@@ -200,9 +200,9 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
         print.setAllCaps(false);
         print.setTextSize(15);
         print.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        print.setTextColor(Color.WHITE);
+        print.setTextColor(Theme.ON_PRIMARY);
         android.graphics.drawable.Drawable pi = getDrawable(R.drawable.ic_print).mutate();
-        pi.setTint(Color.WHITE);
+        pi.setTint(Theme.ON_PRIMARY);
         pi.setBounds(0, 0, dp(20), dp(20));
         print.setCompoundDrawables(pi, null, null, null);
         print.setPadding(dp(16), 0, dp(18), 0);
@@ -265,6 +265,16 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
         boolean multi = canvasView.isMultiSelectMode();
         boolean sel = canvasView.hasSelection();
         boolean locked = sel && canvasView.isSelectedLocked();
+        if (canvasView.isCropMode()) {
+            if ("crop".equals(toolsKey)) return;
+            toolsKey = "crop";
+            tools.removeAllViews();
+            section("Crop");
+            tile(R.drawable.ic_check, "Done", ToolTile.STYLE_PRIMARY, true, false, this::applyCrop);
+            tile(R.drawable.ic_reset, "Reset", 0, true, false, () -> canvasView.resetCrop());
+            tile(R.drawable.ic_close, "Cancel", 0, true, false, this::cancelCrop);
+            return;
+        }
         String key = multi + "|" + sel + "|" + locked + "|" + canvasView.getSelectionCount() + "|"
                 + canvasView.hasBorderOnSelected() + "|" + canvasView.isSelectedOffPage() + "|"
                 + canvasView.isPortrait() + "|" + (canvasView.getItemCount() > 0) + "|" + (copiedFormatJson != null);
@@ -308,7 +318,7 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
         boolean free = !locked;
         section("Picture");
         tile(R.drawable.ic_add, "Add", ToolTile.STYLE_PRIMARY, true, false, () -> chooseImage(false));
-        tile(R.drawable.ic_crop, "Crop", 0, free, false, this::showInlineCrop);
+        tile(R.drawable.ic_crop, "Crop", 0, free, false, this::startCrop);
         ToolTile border = tile(R.drawable.ic_border, "Border", 0, free, canvasView.hasBorderOnSelected(), this::toggleBorder);
         border.setOnLongClickListener(v -> { showBorderDialog(); return true; });
         tile(R.drawable.ic_rotate, "Rotate", 0, free, false,
@@ -393,6 +403,36 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
         canvasView.toggleOrientation();
         redo.clear();
         canvasView.fitPage();
+        updateControls();
+    }
+
+    // On-page crop: drag the corner/edge grips on the picture itself; no dialog.
+    private boolean cropUndoPushed = false;
+
+    private void startCrop() {
+        hideUndoBar();
+        int before = undo.size();
+        pushUndo();
+        cropUndoPushed = undo.size() > before;
+        if (!canvasView.startCrop()) {
+            if (cropUndoPushed) undo.pollFirst();
+            cropUndoPushed = false;
+            showToast("Select an unlocked picture first.");
+        }
+    }
+
+    private void applyCrop() { canvasView.finishCrop(true); }
+
+    private void cancelCrop() { canvasView.finishCrop(false); }
+
+    /** Called however crop mode ends (Done, Cancel, Back, or tapping outside the picture). */
+    @Override public void onCropModeChanged(boolean cropping) {
+        if (!cropping && cropUndoPushed) {
+            // Keep one undo step only if the crop actually changed something.
+            if (!undo.isEmpty() && undo.peekFirst().equals(canvasView.toJson())) undo.pollFirst();
+            else redo.clear();
+            cropUndoPushed = false;
+        }
         updateControls();
     }
 
@@ -550,6 +590,7 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
         menu.add(0, 3, 0, "Save page as PDF…").setEnabled(any);
         menu.add(0, 4, 0, "Check printer");
         menu.add(0, 5, 0, "Printer settings…");
+        menu.add(0, 10, 0, "Color scheme…");
         menu.add(0, 6, 0, "New picture defaults…");
         SubMenu diag = menu.addSubMenu(0, 7, 0, "Troubleshooting");
         diag.add(0, 71, 0, "Copy diagnostic log");
@@ -566,6 +607,7 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
                 case 4: wakePrinter(); break;
                 case 5: showPrinterSettingsDialog(); break;
                 case 6: showEditorPreferences(); break;
+                case 10: showSchemePicker(); break;
                 case 71: copyLog(); break;
                 case 72: exportLog(); break;
                 case 73: showUsageInsights(); break;
@@ -587,7 +629,8 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
     // ───────────────────────────── Dialogs ─────────────────────────────
 
     private AlertDialog.Builder dialog() {
-        return new AlertDialog.Builder(this, android.R.style.Theme_Material_Light_Dialog_Alert);
+        return new AlertDialog.Builder(this, Theme.DARK ? android.R.style.Theme_Material_Dialog_Alert
+                : android.R.style.Theme_Material_Light_Dialog_Alert);
     }
 
     private void showExactSizeDialog() {
@@ -803,104 +846,6 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
                 .show();
     }
 
-    /** Live crop overlay over the page, adjusted with four sliders. */
-    private void showInlineCrop() {
-        if (!canvasView.hasSelection() || canvasView.isSelectedLocked()) { showToast("Select an unlocked picture first."); return; }
-        if (cropOverlay != null) return;
-        final float[] original = canvasView.getSelectedCrop();
-        final int[] values = new int[] {
-                Math.round(original[0] * 100f), Math.round(original[1] * 100f),
-                Math.round(original[2] * 100f), Math.round(original[3] * 100f)
-        };
-        pushUndo();
-        canvasView.fitSelection();
-
-        FrameLayout scrim = new FrameLayout(this);
-        cropOverlay = scrim;
-        LinearLayout panel = new LinearLayout(this);
-        panel.setOrientation(LinearLayout.VERTICAL);
-        panel.setClickable(true);
-        panel.setPadding(dp(16), dp(12), dp(16), dp(10));
-        GradientDrawable background = new GradientDrawable();
-        background.setColor(Theme.SURFACE);
-        background.setCornerRadii(new float[]{dp(20), dp(20), dp(20), dp(20), 0, 0, 0, 0});
-        panel.setBackground(background);
-        panel.setElevation(dp(8));
-
-        TextView title = new TextView(this);
-        title.setText("Crop — trim each edge");
-        title.setTextColor(Theme.TEXT);
-        title.setTextSize(16);
-        title.setTypeface(Typeface.DEFAULT_BOLD);
-        panel.addView(title);
-        String[] names = new String[]{"Left", "Top", "Right", "Bottom"};
-        for (int i = 0; i < 4; i++) {
-            final int idx = i;
-            LinearLayout line = new LinearLayout(this);
-            line.setOrientation(LinearLayout.HORIZONTAL);
-            line.setGravity(Gravity.CENTER_VERTICAL);
-            TextView lbl = new TextView(this);
-            lbl.setText(names[i] + " " + values[i] + "%");
-            lbl.setTextColor(Theme.TEXT_SOFT);
-            lbl.setTextSize(13);
-            line.addView(lbl, new LinearLayout.LayoutParams(dp(86), dp(40)));
-            SeekBar seek = new SeekBar(this);
-            seek.setMax(45);
-            seek.setProgress(values[i]);
-            seek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-                @Override public void onProgressChanged(SeekBar bar, int progress, boolean user) {
-                    values[idx] = progress;
-                    if (values[0] + values[2] > 85) values[idx] = 85 - values[idx == 0 ? 2 : 0];
-                    if (values[1] + values[3] > 85) values[idx] = 85 - values[idx == 1 ? 3 : 1];
-                    if (values[idx] != progress) { bar.setProgress(values[idx]); return; }
-                    lbl.setText(names[idx] + " " + values[idx] + "%");
-                    canvasView.setSelectedCrop(values[0] / 100f, values[1] / 100f, values[2] / 100f, values[3] / 100f);
-                }
-                @Override public void onStartTrackingTouch(SeekBar bar) {}
-                @Override public void onStopTrackingTouch(SeekBar bar) {}
-            });
-            line.addView(seek, new LinearLayout.LayoutParams(0, dp(40), 1f));
-            panel.addView(line);
-        }
-        LinearLayout actions = new LinearLayout(this);
-        actions.setGravity(Gravity.END);
-        actions.setPadding(0, dp(6), 0, 0);
-        Button cancel = textButton("Cancel", false);
-        cropCancel = () -> {
-            canvasView.setSelectedCrop(original[0], original[1], original[2], original[3]);
-            undo.pollFirst();
-            closeCrop();
-        };
-        cancel.setOnClickListener(v -> cropCancel.run());
-        Button reset = textButton("Reset", false);
-        reset.setOnClickListener(v -> {
-            canvasView.setSelectedCrop(0f, 0f, 0f, 0f);
-            redo.clear();
-            closeCrop();
-        });
-        Button done = textButton("Apply", true);
-        done.setOnClickListener(v -> {
-            redo.clear();
-            Diagnostics.log("INLINE_CROP_APPLIED", "crop adjusted on page");
-            closeCrop();
-        });
-        actions.addView(cancel); actions.addView(reset); actions.addView(done);
-        panel.addView(actions);
-        FrameLayout.LayoutParams p = new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
-        if (railLayout) p.width = Math.min(dp(520), getResources().getDisplayMetrics().widthPixels);
-        scrim.addView(panel, p);
-        canvasHost.addView(scrim, new FrameLayout.LayoutParams(-1, -1));
-        Diagnostics.log("INLINE_CROP_OPENED", "editor stays in place");
-    }
-
-    private void closeCrop() {
-        if (cropOverlay != null) canvasHost.removeView(cropOverlay);
-        cropOverlay = null;
-        cropCancel = null;
-        canvasView.fitPage();
-        updateControls();
-    }
-
     private void confirmClear() {
         if (canvasView.getItemCount() == 0) return;
         dialog().setTitle("Clear the page?")
@@ -995,6 +940,7 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
     }
 
     private void undo() {
+        if (canvasView.isCropMode()) { cancelCrop(); return; }
         if (undo.isEmpty()) return;
         String current = canvasView.toJson();
         String previous = undo.removeFirst();
@@ -1009,6 +955,7 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
     }
 
     private void redo() {
+        if (canvasView.isCropMode()) return;
         if (redo.isEmpty()) return;
         String current = canvasView.toJson();
         String next = redo.removeFirst();
@@ -1037,7 +984,7 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
         bar.addView(t, new LinearLayout.LayoutParams(0, -2, 1f));
         TextView action = new TextView(this);
         action.setText("UNDO");
-        action.setTextColor(0xFF9DBBFF);
+        action.setTextColor(Theme.SNACK_ACTION);
         action.setTypeface(Typeface.DEFAULT_BOLD);
         action.setGravity(Gravity.CENTER);
         action.setPadding(dp(14), 0, dp(14), 0);
@@ -1400,7 +1347,9 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
     private void updateStatus() {
         if (subtitle == null || canvasView == null) return;
         String text;
-        if (canvasView.isMultiSelectMode()) {
+        if (canvasView.isCropMode()) {
+            text = "Drag the corners or edges to trim • drag inside to move";
+        } else if (canvasView.isMultiSelectMode()) {
             int n = canvasView.getSelectionCount();
             text = n == 0 ? "Tap pictures to select them" : n + " selected";
         } else if (canvasView.hasSelection()) {
@@ -1443,19 +1392,22 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
     @Override public void onConfigurationChanged(Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
         Diagnostics.log("DEVICE_ROTATED", "orientation=" + newConfig.orientation);
-        if (canvasView != null) {
-            String sheet = canvasView.toJson();
-            cropOverlay = null;
-            cropCancel = null;
-            undoBar = null;
-            setContentView(buildUi());
-            canvasView.fromJson(sheet);
-            updateControls();
-        }
+        rebuildUi();
+    }
+
+    /** Re-creates the screen (after rotation or a colour change) without losing the sheet or undo history. */
+    private void rebuildUi() {
+        if (canvasView == null) return;
+        if (canvasView.isCropMode()) applyCrop();
+        String sheet = canvasView.toJson();
+        undoBar = null;
+        setContentView(buildUi());
+        canvasView.fromJson(sheet);
+        updateControls();
     }
 
     @Override public void onBackPressed() {
-        if (cropOverlay != null && cropCancel != null) { cropCancel.run(); return; }
+        if (canvasView != null && canvasView.isCropMode()) { cancelCrop(); return; }
         if (canvasView != null && canvasView.isMultiSelectMode()) { canvasView.setMultiSelectMode(false); canvasView.clearSelection(); return; }
         if (canvasView != null && canvasView.hasSelection()) { canvasView.clearSelection(); return; }
         super.onBackPressed();
@@ -1528,6 +1480,274 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
         }
     }
 
+
+    // ───────────────────────────── Colour schemes ─────────────────────────────
+
+    private void applyWindowColors() {
+        android.view.Window w = getWindow();
+        w.setStatusBarColor(Theme.SURFACE);
+        w.setNavigationBarColor(Theme.SURFACE);
+        w.setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(Theme.SURFACE));
+        View decor = w.getDecorView();
+        int flags = decor.getSystemUiVisibility();
+        if (Theme.DARK) flags &= ~View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR; else flags |= View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
+        if (Build.VERSION.SDK_INT >= 26) {
+            if (Theme.DARK) flags &= ~View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR; else flags |= View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+        }
+        decor.setSystemUiVisibility(flags);
+    }
+
+    private void showSchemePicker() {
+        LinearLayout list = new LinearLayout(this);
+        list.setOrientation(LinearLayout.VERTICAL);
+        list.setPadding(dp(8), dp(4), dp(8), dp(4));
+        java.util.ArrayList<Theme.Scheme> all = new java.util.ArrayList<>(java.util.Arrays.asList(Theme.PRESETS));
+        Theme.Scheme custom = Theme.customOrNull(this);
+        if (custom != null) all.add(custom);
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(list);
+        AlertDialog dlg = dialog().setTitle("Color scheme").setView(scroll)
+                .setNeutralButton("Customize…", (d, w) -> showCustomizeScheme())
+                .setPositiveButton("Done", null).create();
+        for (Theme.Scheme sc : all) {
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setPadding(dp(12), dp(8), dp(12), dp(8));
+            row.setBackground(ripple(12));
+            row.setClickable(true);
+            row.setContentDescription(sc.name);
+            row.addView(schemePreview(sc), new LinearLayout.LayoutParams(dp(76), dp(44)));
+            TextView name = new TextView(this);
+            name.setText(sc.name);
+            name.setTextSize(15);
+            name.setTextColor(Theme.TEXT);
+            name.setPadding(dp(14), 0, 0, 0);
+            row.addView(name, new LinearLayout.LayoutParams(0, -2, 1f));
+            boolean isCurrent = sc.id.equals(Theme.current.id);
+            if (isCurrent) {
+                android.widget.ImageView check = new android.widget.ImageView(this);
+                check.setImageResource(R.drawable.ic_check);
+                check.setImageTintList(ColorStateList.valueOf(Theme.PRIMARY));
+                row.addView(check, new LinearLayout.LayoutParams(dp(28), dp(28)));
+            }
+            row.setOnClickListener(v -> {
+                Theme.apply(sc);
+                Theme.save(this, sc);
+                Diagnostics.log("COLOR_SCHEME", sc.id);
+                rebuildUi();
+                dlg.dismiss();
+                showSchemePicker();
+            });
+            list.addView(row, new LinearLayout.LayoutParams(-1, -2));
+        }
+        dlg.show();
+    }
+
+    /** Tiny picture of the scheme: bar, page area, accent button and a text line. */
+    private View schemePreview(Theme.Scheme sc) {
+        FrameLayout f = new FrameLayout(this);
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(sc.workspace);
+        bg.setCornerRadius(dp(8));
+        bg.setStroke(dp(1), Theme.blend(sc.workspace, sc.text, 0.25f));
+        f.setBackground(bg);
+        View bar = new View(this);
+        GradientDrawable barBg = new GradientDrawable();
+        barBg.setColor(sc.bars);
+        barBg.setCornerRadii(new float[]{dp(8), dp(8), dp(8), dp(8), 0, 0, 0, 0});
+        bar.setBackground(barBg);
+        f.addView(bar, new FrameLayout.LayoutParams(-1, dp(15), Gravity.TOP));
+        View line = new View(this);
+        line.setBackgroundColor(sc.text);
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(dp(26), dp(3), Gravity.TOP | Gravity.START);
+        lp.setMargins(dp(7), dp(6), 0, 0);
+        f.addView(line, lp);
+        View btn = new View(this);
+        GradientDrawable bb = new GradientDrawable();
+        bb.setColor(sc.accent);
+        bb.setCornerRadius(dp(5));
+        btn.setBackground(bb);
+        FrameLayout.LayoutParams bp = new FrameLayout.LayoutParams(dp(18), dp(9), Gravity.TOP | Gravity.END);
+        bp.setMargins(0, dp(3), dp(6), 0);
+        f.addView(btn, bp);
+        View page = new View(this);
+        page.setBackgroundColor(Color.WHITE);
+        FrameLayout.LayoutParams pg = new FrameLayout.LayoutParams(dp(18), dp(22), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        pg.bottomMargin = dp(3);
+        f.addView(page, pg);
+        return f;
+    }
+
+    private static final String[] ROLE_NAMES = {"Accent (buttons, selection)", "Bars", "Around the page", "Text and icons"};
+
+    private void showCustomizeScheme() {
+        final Theme.Scheme original = Theme.current;
+        final Theme.Scheme[] working = {original};
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(14), dp(4), dp(14), dp(4));
+        TextView intro = label("Starting from \"" + original.name + "\". Tap a colour to change it — the app updates as you go.");
+        box.addView(intro);
+        TextView warn = label("");
+        warn.setTextColor(Theme.DANGER);
+        View[] swatches = new View[4];
+        Runnable refresh = () -> {
+            int[] cols = {working[0].accent, working[0].bars, working[0].workspace, working[0].text};
+            for (int i = 0; i < 4; i++) swatches[i].setBackground(swatch(cols[i]));
+            double c = Theme.contrast(working[0].text, working[0].bars);
+            warn.setText(c < 4.5 ? "Text and bars are close in brightness — text may be hard to read." : "");
+            warn.setVisibility(c < 4.5 ? View.VISIBLE : View.GONE);
+        };
+        for (int i = 0; i < 4; i++) {
+            final int role = i;
+            LinearLayout row = new LinearLayout(this);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setPadding(dp(8), dp(8), dp(8), dp(8));
+            row.setBackground(ripple(12));
+            row.setClickable(true);
+            swatches[i] = new View(this);
+            row.addView(swatches[i], new LinearLayout.LayoutParams(dp(36), dp(36)));
+            TextView t = new TextView(this);
+            t.setText(ROLE_NAMES[i]);
+            t.setTextSize(15);
+            t.setTextColor(Theme.TEXT);
+            t.setPadding(dp(14), 0, 0, 0);
+            row.addView(t, new LinearLayout.LayoutParams(0, -2, 1f));
+            row.setOnClickListener(v -> {
+                int[] cols = {working[0].accent, working[0].bars, working[0].workspace, working[0].text};
+                showColorPicker(ROLE_NAMES[role], cols[role], color -> {
+                    working[0] = working[0].with(role, color);
+                    Theme.apply(working[0]);
+                    rebuildUi();
+                    refresh.run();
+                });
+            });
+            box.addView(row, new LinearLayout.LayoutParams(-1, -2));
+        }
+        box.addView(warn);
+        refresh.run();
+        dialog().setTitle("Customize colors").setView(box)
+                .setNegativeButton("Cancel", (d, w) -> { Theme.apply(original); rebuildUi(); })
+                .setNeutralButton("Presets…", (d, w) -> { Theme.apply(original); rebuildUi(); showSchemePicker(); })
+                .setPositiveButton("Save", (d, w) -> {
+                    if (working[0] == original) return;
+                    Theme.Scheme saved = working[0];
+                    Theme.save(this, saved);
+                    Theme.apply(saved);
+                    Diagnostics.log("COLOR_SCHEME", "custom saved");
+                    showToast("Custom colors saved. Find them as \"Custom\" in Color scheme.");
+                })
+                .setOnCancelListener(d -> { Theme.apply(original); rebuildUi(); })
+                .show();
+    }
+
+    private GradientDrawable swatch(int color) {
+        GradientDrawable g = new GradientDrawable();
+        g.setShape(GradientDrawable.OVAL);
+        g.setColor(color);
+        g.setStroke(dp(1), Theme.OUTLINE);
+        return g;
+    }
+
+    private interface ColorCallback { void picked(int color); }
+
+    private static final int[] QUICK_COLORS = {
+            0xFF2563EB, 0xFF0F8B8D, 0xFF2E7D32, 0xFFD9480F, 0xFF6D28D9, 0xFFD6336C, 0xFFE11D48, 0xFFCA8A04,
+            0xFFFFFFFF, 0xFFF4F6FA, 0xFFE3E9F1, 0xFFECEFF4, 0xFF94A3B8, 0xFF1E2A3B, 0xFF111722, 0xFF000000};
+
+    /** Pick a colour: quick swatches, hue/saturation/brightness sliders, or a #RRGGBB code. */
+    private void showColorPicker(String title, int initial, ColorCallback callback) {
+        final float[] hsv = new float[3];
+        Color.colorToHSV(initial, hsv);
+        final boolean[] syncing = {false};
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(20), dp(6), dp(20), 0);
+
+        View preview = new View(this);
+        box.addView(preview, new LinearLayout.LayoutParams(-1, dp(44)));
+        EditText hex = new EditText(this);
+        hex.setSingleLine(true);
+        hex.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        hex.setHint("#RRGGBB");
+        box.addView(hex, new LinearLayout.LayoutParams(-1, -2));
+
+        LinearLayout grid = new LinearLayout(this);
+        grid.setOrientation(LinearLayout.VERTICAL);
+        SeekBar hue = new SeekBar(this), sat = new SeekBar(this), val = new SeekBar(this);
+        hue.setMax(360); sat.setMax(100); val.setMax(100);
+        GradientDrawable rainbow = new GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,
+                new int[]{0xFFFF0000, 0xFFFFFF00, 0xFF00FF00, 0xFF00FFFF, 0xFF0000FF, 0xFFFF00FF, 0xFFFF0000});
+        rainbow.setCornerRadius(dp(6));
+        hue.setProgressDrawable(rainbow);
+
+        Runnable show = () -> {
+            int c = Color.HSVToColor(hsv);
+            GradientDrawable g = new GradientDrawable();
+            g.setColor(c);
+            g.setCornerRadius(dp(10));
+            g.setStroke(dp(1), Theme.OUTLINE);
+            preview.setBackground(g);
+            if (!syncing[0]) { syncing[0] = true; hex.setText(String.format("#%06X", c & 0xFFFFFF)); syncing[0] = false; }
+        };
+        Runnable toSliders = () -> {
+            syncing[0] = true;
+            hue.setProgress(Math.round(hsv[0])); sat.setProgress(Math.round(hsv[1] * 100)); val.setProgress(Math.round(hsv[2] * 100));
+            syncing[0] = false;
+        };
+
+        for (int r = 0; r < 2; r++) {
+            LinearLayout row = new LinearLayout(this);
+            for (int c = 0; c < 8; c++) {
+                final int color = QUICK_COLORS[r * 8 + c];
+                View dot = new View(this);
+                dot.setBackground(swatch(color));
+                dot.setClickable(true);
+                dot.setOnClickListener(v -> { Color.colorToHSV(color, hsv); toSliders.run(); show.run(); });
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(30), 1f);
+                lp.setMargins(dp(3), dp(4), dp(3), dp(4));
+                row.addView(dot, lp);
+            }
+            grid.addView(row);
+        }
+        box.addView(grid);
+
+        SeekBar.OnSeekBarChangeListener l = new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar b, int v, boolean user) {
+                if (syncing[0]) return;
+                hsv[0] = hue.getProgress(); hsv[1] = sat.getProgress() / 100f; hsv[2] = val.getProgress() / 100f;
+                show.run();
+            }
+            @Override public void onStartTrackingTouch(SeekBar b) {}
+            @Override public void onStopTrackingTouch(SeekBar b) {}
+        };
+        hue.setOnSeekBarChangeListener(l); sat.setOnSeekBarChangeListener(l); val.setOnSeekBarChangeListener(l);
+        box.addView(label("Hue")); box.addView(hue, new LinearLayout.LayoutParams(-1, dp(36)));
+        box.addView(label("Strength")); box.addView(sat, new LinearLayout.LayoutParams(-1, dp(36)));
+        box.addView(label("Brightness")); box.addView(val, new LinearLayout.LayoutParams(-1, dp(36)));
+
+        hex.addTextChangedListener(new SimpleWatcher(() -> {
+            if (syncing[0]) return;
+            String t = hex.getText().toString().trim();
+            if (!t.startsWith("#")) t = "#" + t;
+            if (t.length() != 7) return;
+            try {
+                Color.colorToHSV(Color.parseColor(t), hsv);
+                syncing[0] = true; show.run(); syncing[0] = false;
+                toSliders.run();
+            } catch (IllegalArgumentException ignored) { }
+        }));
+        toSliders.run();
+        show.run();
+        ScrollView sv = new ScrollView(this);
+        sv.addView(box);
+        dialog().setTitle(title).setView(sv)
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Use color", (d, w) -> callback.picked(Color.HSVToColor(hsv)))
+                .show();
+    }
+
     // ───────────────────────────── View helpers ─────────────────────────────
 
     private ImageButton iconButton(int icon, String description, View.OnClickListener click) {
@@ -1548,7 +1768,7 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
         b.setTextSize(14);
         b.setMinHeight(0); b.setMinimumHeight(0); b.setMinWidth(0); b.setMinimumWidth(0);
         b.setStateListAnimator(null);
-        b.setTextColor(primary ? Color.WHITE : Theme.PRIMARY);
+        b.setTextColor(primary ? Theme.ON_PRIMARY : Theme.PRIMARY);
         b.setBackground(primary ? pill(Theme.PRIMARY, 0, 22) : ripple(22));
         b.setPadding(dp(18), 0, dp(18), 0);
         LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(-2, dp(44));
@@ -1569,7 +1789,7 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
         GradientDrawable mask = new GradientDrawable();
         mask.setColor(Color.WHITE);
         mask.setCornerRadius(dp(radiusDp));
-        return new RippleDrawable(ColorStateList.valueOf(0x22476082), null, mask);
+        return new RippleDrawable(ColorStateList.valueOf(Theme.RIPPLE), null, mask);
     }
 
     private View divider(boolean horizontal) {

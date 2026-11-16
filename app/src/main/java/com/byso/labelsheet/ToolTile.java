@@ -68,7 +68,7 @@ final class ToolTile extends LinearLayout {
         if (style == STYLE_PRIMARY) {
             fg = Theme.PRIMARY;
             wellBg.setColor(Theme.PRIMARY);
-            icon.setImageTintList(ColorStateList.valueOf(0xFFFFFFFF));
+            icon.setImageTintList(ColorStateList.valueOf(Theme.ON_PRIMARY));
         } else if (active) {
             fg = Theme.PRIMARY;
             wellBg.setColor(Theme.PRIMARY_SOFT);
@@ -83,7 +83,7 @@ final class ToolTile extends LinearLayout {
         GradientDrawable mask = new GradientDrawable();
         mask.setColor(0xFFFFFFFF);
         mask.setCornerRadius(dp(14));
-        setBackground(new RippleDrawable(ColorStateList.valueOf(0x22476082), null, mask));
+        setBackground(new RippleDrawable(ColorStateList.valueOf(Theme.RIPPLE), null, mask));
     }
 
     private int dp(float v) { return Math.round(v * getResources().getDisplayMetrics().density); }

@@ -33,6 +33,7 @@ public class LetterCanvasView extends View {
         void onSelectionChanged(boolean hasSelection);
         void onEditStarted();
         void onSheetChanged();
+        default void onCropModeChanged(boolean cropping) {}
     }
 
     private final ArrayList<SheetItem> items = new ArrayList<>();
@@ -126,6 +127,238 @@ public class LetterCanvasView extends View {
     public boolean isSelectedOffPage() { return hasSelection() && !touchesPage(items.get(selected)); }
     public boolean isSelectionMultiple() { return selectedSet.size() > 1; }
 
+    // ───── On-page crop mode ─────
+    // While cropping, the whole original picture is shown faintly and the kept area is framed with handles.
+    // Dragging an edge/corner trims; dragging inside slides the frame over the picture. The picture never
+    // changes scale: the label box shrinks/grows with the crop, so nothing is stretched.
+    private static final float MIN_CROP_KEEP = 0.05f;
+    private boolean cropMode = false;
+    private int cropIndex = -1;
+    private float[] cropStart;      // x,y,w,h,cl,ct,cr,cb when crop mode started (for Cancel)
+    private float[] cropDown;       // same, captured at finger down
+    private float[] cropFull;       // full-picture frame fx,fy,fw,fh (fixed during a gesture)
+    private int cropHandle = HANDLE_NONE;
+    private static final int HANDLE_MOVE = 99;
+    private boolean cropGestureActive = false;
+    private final Paint ghostPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+    private final Paint veilPaint = new Paint();
+    private final Paint frameWhite = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint frameAccent = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint thirdsPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+
+    public boolean isCropMode() { return cropMode; }
+
+    private static float[] snapshot(SheetItem i) {
+        return new float[]{i.x, i.y, i.w, i.h, i.cropLeft, i.cropTop, i.cropRight, i.cropBottom};
+    }
+
+    private static void restore(SheetItem i, float[] v) {
+        i.x = v[0]; i.y = v[1]; i.w = v[2]; i.h = v[3];
+        i.cropLeft = v[4]; i.cropTop = v[5]; i.cropRight = v[6]; i.cropBottom = v[7];
+    }
+
+    /** Frame the uncropped picture would occupy at the current scale. */
+    private static float[] fullFrame(SheetItem i) {
+        float kx = Math.max(0.01f, 1f - i.cropLeft - i.cropRight);
+        float ky = Math.max(0.01f, 1f - i.cropTop - i.cropBottom);
+        float fw = i.w / kx, fh = i.h / ky;
+        return new float[]{i.x - i.cropLeft * fw, i.y - i.cropTop * fh, fw, fh};
+    }
+
+    /** Applies crop fractions while keeping the picture's scale and position fixed. */
+    private static void setCropKeepingScale(SheetItem i, float[] full, float l, float t, float r, float b) {
+        i.cropLeft = l; i.cropTop = t; i.cropRight = r; i.cropBottom = b;
+        i.x = full[0] + l * full[2];
+        i.y = full[1] + t * full[3];
+        i.w = full[2] * (1f - l - r);
+        i.h = full[3] * (1f - t - b);
+    }
+
+    public boolean startCrop() {
+        if (!hasSelection() || items.get(selected).locked || items.get(selected).bitmap == null) return false;
+        if (multiSelectMode) { multiSelectMode = false; }
+        cropIndex = selected;
+        selectedSet.clear(); selectedSet.add(selected);
+        cropStart = snapshot(items.get(cropIndex));
+        cropMode = true;
+        Diagnostics.log("CROP_MODE", "on");
+        invalidate();
+        if (listener != null) { listener.onCropModeChanged(true); listener.onSelectionChanged(true); }
+        return true;
+    }
+
+    /** Undoes all trimming on the picture being cropped (shows the whole picture again). */
+    public void resetCrop() {
+        if (!cropMode || cropIndex < 0 || cropIndex >= items.size()) return;
+        SheetItem it = items.get(cropIndex);
+        float[] f = fullFrame(it);
+        setCropKeepingScale(it, f, 0f, 0f, 0f, 0f);
+        // Also restore the picture's true proportions (fixes pictures stretched by the old crop tool).
+        if (it.bitmap != null && it.bitmap.getHeight() > 0) {
+            float pw = portrait ? 8.5f : 11f, ph = portrait ? 11f : 8.5f;
+            float aspect = it.bitmap.getWidth() / (float) it.bitmap.getHeight();
+            float cy = it.y + it.h / 2f;
+            it.h = (it.w * pw / aspect) / ph;
+            if (it.h > 1f + 2f * BOARD_Y) { float k = (1f + 2f * BOARD_Y) / it.h; it.h *= k; it.w *= k; }
+            it.y = cy - it.h / 2f;
+        }
+        invalidate();
+    }
+
+    /** Leaves crop mode. apply=false restores the picture. Returns true if the picture changed. */
+    public boolean finishCrop(boolean apply) {
+        if (!cropMode) return false;
+        boolean changed = false;
+        if (cropIndex >= 0 && cropIndex < items.size()) {
+            SheetItem it = items.get(cropIndex);
+            if (!apply) restore(it, cropStart);
+            else {
+                clampToBoard(it);
+                float[] now = snapshot(it);
+                for (int k = 0; k < now.length; k++) if (Math.abs(now[k] - cropStart[k]) > 0.0001f) changed = true;
+            }
+        }
+        cropMode = false;
+        cropIndex = -1;
+        cropGestureActive = false;
+        Diagnostics.log("CROP_MODE", apply ? (changed ? "applied" : "unchanged") : "cancelled");
+        invalidate();
+        if (listener != null) {
+            listener.onCropModeChanged(false);
+            if (changed) listener.onSheetChanged();
+            listener.onSelectionChanged(hasSelection());
+        }
+        return changed;
+    }
+
+    private void drawCropMode(Canvas canvas) {
+        if (cropIndex < 0 || cropIndex >= items.size()) return;
+        SheetItem it = items.get(cropIndex);
+        if (it.bitmap == null) return;
+        float d = getResources().getDisplayMetrics().density;
+        RectF dst = itemRect(it, pageRect);
+        float[] f = fullFrame(it);
+        RectF full = new RectF(pageRect.left + f[0] * pageRect.width(), pageRect.top + f[1] * pageRect.height(),
+                pageRect.left + (f[0] + f[2]) * pageRect.width(), pageRect.top + (f[1] + f[3]) * pageRect.height());
+        canvas.save();
+        canvas.rotate(it.rotation, dst.centerX(), dst.centerY());
+        // whole picture, faint, with the trimmed-away parts darkened
+        Matrix m = new Matrix();
+        m.setRectToRect(new RectF(0, 0, it.bitmap.getWidth(), it.bitmap.getHeight()), full, Matrix.ScaleToFit.FILL);
+        canvas.drawBitmap(it.bitmap, m, ghostPaint);
+        canvas.drawRect(full.left, full.top, full.right, dst.top, veilPaint);
+        canvas.drawRect(full.left, dst.bottom, full.right, full.bottom, veilPaint);
+        canvas.drawRect(full.left, dst.top, dst.left, dst.bottom, veilPaint);
+        canvas.drawRect(dst.right, dst.top, full.right, dst.bottom, veilPaint);
+        canvas.restore();
+
+        drawItem(canvas, it, pageRect, false, false);
+
+        canvas.save();
+        canvas.rotate(it.rotation, dst.centerX(), dst.centerY());
+        for (int k = 1; k <= 2; k++) {
+            float gx = dst.left + dst.width() * k / 3f, gy = dst.top + dst.height() * k / 3f;
+            canvas.drawLine(gx, dst.top, gx, dst.bottom, thirdsPaint);
+            canvas.drawLine(dst.left, gy, dst.right, gy, thirdsPaint);
+        }
+        canvas.drawRect(dst, frameWhite);
+        canvas.drawRect(dst, frameAccent);
+        // corner brackets + edge bars: the parts you grab
+        float L = Math.min(18f * d, Math.min(dst.width(), dst.height()) / 3f);
+        Paint grip = new Paint(Paint.ANTI_ALIAS_FLAG);
+        grip.setStyle(Paint.Style.STROKE);
+        grip.setStrokeCap(Paint.Cap.ROUND);
+        grip.setStrokeWidth(5f * d);
+        grip.setColor(Color.WHITE);
+        grip.setShadowLayer(3f * d, 0f, 1f * d, 0x66000000);
+        float l = dst.left, t = dst.top, r = dst.right, b = dst.bottom, cx = dst.centerX(), cy = dst.centerY();
+        float[][] lines = {
+                {l, t, l + L, t}, {l, t, l, t + L}, {r, t, r - L, t}, {r, t, r, t + L},
+                {l, b, l + L, b}, {l, b, l, b - L}, {r, b, r - L, b}, {r, b, r, b - L},
+                {cx - L / 2f, t, cx + L / 2f, t}, {cx - L / 2f, b, cx + L / 2f, b},
+                {l, cy - L / 2f, l, cy + L / 2f}, {r, cy - L / 2f, r, cy + L / 2f}};
+        for (float[] ln : lines) canvas.drawLine(ln[0], ln[1], ln[2], ln[3], grip);
+        canvas.restore();
+    }
+
+    private boolean onCropTouch(MotionEvent event) {
+        if (cropIndex < 0 || cropIndex >= items.size()) return true;
+        SheetItem it = items.get(cropIndex);
+        RectF dst = itemRect(it, pageRect);
+        switch (event.getActionMasked()) {
+            case MotionEvent.ACTION_DOWN: {
+                downX = event.getX(); downY = event.getY();
+                float[] p = rotatePoint(downX, downY, dst.centerX(), dst.centerY(), -it.rotation);
+                float radius = 24f * getResources().getDisplayMetrics().density;
+                float[][] hs = {
+                        {dst.left, dst.top, HANDLE_TL}, {dst.right, dst.top, HANDLE_TR},
+                        {dst.left, dst.bottom, HANDLE_BL}, {dst.right, dst.bottom, HANDLE_BR},
+                        {dst.centerX(), dst.top, HANDLE_TOP}, {dst.centerX(), dst.bottom, HANDLE_BOTTOM},
+                        {dst.left, dst.centerY(), HANDLE_LEFT}, {dst.right, dst.centerY(), HANDLE_RIGHT}};
+                cropHandle = HANDLE_NONE;
+                float best = radius;
+                for (float[] h : hs) {
+                    float dd = (float) Math.hypot(p[0] - h[0], p[1] - h[1]);
+                    if (dd <= best) { best = dd; cropHandle = (int) h[2]; }
+                }
+                // Grab an edge anywhere along its length, not only at the bar.
+                if (cropHandle == HANDLE_NONE) {
+                    float edge = 16f * getResources().getDisplayMetrics().density;
+                    boolean inY = p[1] > dst.top && p[1] < dst.bottom, inX = p[0] > dst.left && p[0] < dst.right;
+                    if (inY && Math.abs(p[0] - dst.left) < edge) cropHandle = HANDLE_LEFT;
+                    else if (inY && Math.abs(p[0] - dst.right) < edge) cropHandle = HANDLE_RIGHT;
+                    else if (inX && Math.abs(p[1] - dst.top) < edge) cropHandle = HANDLE_TOP;
+                    else if (inX && Math.abs(p[1] - dst.bottom) < edge) cropHandle = HANDLE_BOTTOM;
+                    else if (dst.contains(p[0], p[1])) cropHandle = HANDLE_MOVE;
+                }
+                cropGestureActive = true;
+                cropDown = snapshot(it);
+                cropFull = fullFrame(it);
+                if (cropHandle == HANDLE_NONE) {
+                    // Tap outside the picture: finish cropping.
+                    float[] f = cropFull;
+                    RectF full = new RectF(pageRect.left + f[0] * pageRect.width(), pageRect.top + f[1] * pageRect.height(),
+                            pageRect.left + (f[0] + f[2]) * pageRect.width(), pageRect.top + (f[1] + f[3]) * pageRect.height());
+                    if (!full.contains(p[0], p[1])) { cropGestureActive = false; finishCrop(true); }
+                }
+                return true;
+            }
+            case MotionEvent.ACTION_MOVE: {
+                if (!cropGestureActive || cropHandle == HANDLE_NONE || scaleDetector.isInProgress()) return true;
+                double rad = Math.toRadians(-it.rotation);
+                float sdx = event.getX() - downX, sdy = event.getY() - downY;
+                float ldx = (float) (sdx * Math.cos(rad) - sdy * Math.sin(rad));
+                float ldy = (float) (sdx * Math.sin(rad) + sdy * Math.cos(rad));
+                float fx = ldx / Math.max(1f, pageRect.width()) / Math.max(0.0001f, cropFull[2]);
+                float fy = ldy / Math.max(1f, pageRect.height()) / Math.max(0.0001f, cropFull[3]);
+                float l = cropDown[4], t = cropDown[5], r = cropDown[6], b = cropDown[7];
+                if (cropHandle == HANDLE_MOVE) {
+                    float mx = clamp(fx, -l, r), my = clamp(fy, -t, b);
+                    l += mx; r -= mx; t += my; b -= my;
+                } else {
+                    if (cropHandle == HANDLE_LEFT || cropHandle == HANDLE_TL || cropHandle == HANDLE_BL)
+                        l = clamp(l + fx, 0f, 1f - r - MIN_CROP_KEEP);
+                    if (cropHandle == HANDLE_RIGHT || cropHandle == HANDLE_TR || cropHandle == HANDLE_BR)
+                        r = clamp(r - fx, 0f, 1f - l - MIN_CROP_KEEP);
+                    if (cropHandle == HANDLE_TOP || cropHandle == HANDLE_TL || cropHandle == HANDLE_TR)
+                        t = clamp(t + fy, 0f, 1f - b - MIN_CROP_KEEP);
+                    if (cropHandle == HANDLE_BOTTOM || cropHandle == HANDLE_BL || cropHandle == HANDLE_BR)
+                        b = clamp(b - fy, 0f, 1f - t - MIN_CROP_KEEP);
+                }
+                setCropKeepingScale(it, cropFull, l, t, r, b);
+                invalidate();
+                return true;
+            }
+            case MotionEvent.ACTION_UP:
+            case MotionEvent.ACTION_CANCEL:
+                cropGestureActive = false;
+                cropHandle = HANDLE_NONE;
+                if (listener != null) listener.onSelectionChanged(true);
+                return true;
+        }
+        return true;
+    }
+
     public LetterCanvasView(Context context) {
         this(context, null);
     }
@@ -140,7 +373,7 @@ public class LetterCanvasView extends View {
 
         selectedPaint.setStyle(Paint.Style.STROKE);
         selectedPaint.setStrokeWidth(2.2f * getResources().getDisplayMetrics().density);
-        selectedPaint.setColor(Color.rgb(25, 181, 165));
+        selectedPaint.setColor(Theme.PRIMARY);
 
         safePaint.setStyle(Paint.Style.STROKE);
         safePaint.setStrokeWidth(1f * getResources().getDisplayMetrics().density);
@@ -149,15 +382,15 @@ public class LetterCanvasView extends View {
 
         guidePaint.setStyle(Paint.Style.STROKE);
         guidePaint.setStrokeWidth(1.3f * getResources().getDisplayMetrics().density);
-        guidePaint.setColor(Color.rgb(25, 181, 165));
+        guidePaint.setColor(Theme.PRIMARY);
 
         float d = getResources().getDisplayMetrics().density;
-        boardPaint.setColor(0xFFEEF2F8);
+        boardPaint.setColor(Theme.BOARD);
         boardEdgePaint.setStyle(Paint.Style.STROKE);
         boardEdgePaint.setStrokeWidth(1.2f * d);
-        boardEdgePaint.setColor(0xFFC3CEDD);
+        boardEdgePaint.setColor(Theme.BOARD_EDGE);
         boardEdgePaint.setPathEffect(new DashPathEffect(new float[]{6f * d, 5f * d}, 0f));
-        captionPaint.setColor(0xFF7A8BA3);
+        captionPaint.setColor(Theme.CAPTION);
         captionPaint.setTextSize(11.5f * d);
         captionPaint.setTypeface(android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD));
         emptyPaint.setColor(0xFF8A9AB0);
@@ -172,6 +405,17 @@ public class LetterCanvasView extends View {
         badgeTextPaint.setTextSize(10.5f * d);
         badgeTextPaint.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
         dimPaint.setColor(0x33FFFFFF);
+        ghostPaint.setAlpha(110);
+        veilPaint.setColor(0x80101828);
+        frameWhite.setStyle(Paint.Style.STROKE);
+        frameWhite.setStrokeWidth(3.5f * d);
+        frameWhite.setColor(Color.WHITE);
+        frameAccent.setStyle(Paint.Style.STROKE);
+        frameAccent.setStrokeWidth(1.5f * d);
+        frameAccent.setColor(Theme.PRIMARY);
+        thirdsPaint.setStyle(Paint.Style.STROKE);
+        thirdsPaint.setStrokeWidth(1f * d);
+        thirdsPaint.setColor(0x99FFFFFF);
 
         scaleDetector = new ScaleGestureDetector(context, new ScaleGestureDetector.SimpleOnScaleGestureListener() {
             @Override public boolean onScaleBegin(ScaleGestureDetector detector) {
@@ -983,6 +1227,7 @@ public class LetterCanvasView extends View {
         for (int i = 0; i < items.size(); i++) {
             SheetItem item = items.get(i);
             if (item.bitmap == null) continue;
+            if (cropMode && i == cropIndex) continue;
             boolean selectedState = selectedSet.contains(i) || i == selected;
             drawItem(canvas, item, pageRect, selectedState, i == selected && !item.locked);
             RectF r = itemRect(item, pageRect);
@@ -1002,6 +1247,8 @@ public class LetterCanvasView extends View {
             }
             if (item.locked) drawBadge(canvas, "LOCKED", r.left, r.bottom - 20f * d);
         }
+
+        if (cropMode) drawCropMode(canvas);
 
         if (items.isEmpty()) {
             float cy = pageRect.centerY();
@@ -1063,7 +1310,7 @@ public class LetterCanvasView extends View {
                     {dst.left, dst.bottom}, {dst.centerX(), dst.bottom}, {dst.right, dst.bottom}
             };
             Paint edge = new Paint(Paint.ANTI_ALIAS_FLAG);
-            edge.setColor(Color.rgb(25, 181, 165));
+            edge.setColor(Theme.PRIMARY);
             edge.setStyle(Paint.Style.STROKE);
             edge.setStrokeWidth(2f * getResources().getDisplayMetrics().density);
             for (float[] hp : handles) {
@@ -1127,6 +1374,7 @@ public class LetterCanvasView extends View {
 
     @Override public boolean onTouchEvent(MotionEvent event) {
         scaleDetector.onTouchEvent(event);
+        if (cropMode) return onCropTouch(event);
         switch (event.getActionMasked()) {
             case MotionEvent.ACTION_DOWN: {
                 downX = event.getX();

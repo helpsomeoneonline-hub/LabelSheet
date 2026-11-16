@@ -49,26 +49,33 @@ jobs:
           ANDROID_SIGNING_CERT_SHA256: ${{ vars.ANDROID_SIGNING_CERT_SHA256 }}
         run: bash scripts/sign-github-apk.sh app/build/outputs/apk/debug/app-debug.apk
 
+      - name: Read app version
+        id: ver
+        shell: bash
+        run: echo "name=$(sed -n "s/.*versionName '\(.*\)'.*/\1/p" app/build.gradle)" >> "$GITHUB_OUTPUT"
+
       - name: Publish ONLY verified signed APK
-        run: cp app/build/outputs/apk/debug/app-debug.apk LabelSheet-1.9.0.apk
+        run: cp app/build/outputs/apk/debug/app-debug.apk "LabelSheet-${{ steps.ver.outputs.name }}.apk"
 
       - name: Upload signed APK
         uses: actions/upload-artifact@v4
         with:
-          name: LabelSheet-1.9.0-signed-apk
-          path: LabelSheet-1.9.0.apk
+          name: LabelSheet-${{ steps.ver.outputs.name }}-signed-apk
+          path: LabelSheet-${{ steps.ver.outputs.name }}.apk
           if-no-files-found: error
 
       - name: Publish direct APK download on GitHub Releases
         env:
           GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.ver.outputs.name }}
         shell: bash
         run: |
-          tag="labelsheet-v1.9.0"
+          tag="labelsheet-v$VERSION"
+          apk="LabelSheet-$VERSION.apk"
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$tag" "LabelSheet-1.9.0.apk" --clobber --repo "$GITHUB_REPOSITORY"
+            gh release upload "$tag" "$apk" --clobber --repo "$GITHUB_REPOSITORY"
           else
-            gh release create "$tag" "LabelSheet-1.9.0.apk" --repo "$GITHUB_REPOSITORY" \
-              --title "LabelSheet 1.9.0 signed APK" --prerelease --target "$GITHUB_SHA" \
-              --notes "LabelSheet 1.9.0: redesigned phone and tablet layout, tools that change with the selection, and an off-page side area for pictures that should not print. Signed with the same permanent certificate as 1.8.0, so it installs over 1.8.0 and keeps your saved sheet."
+            gh release create "$tag" "$apk" --repo "$GITHUB_REPOSITORY" \
+              --title "LabelSheet $VERSION signed APK" --prerelease --target "$GITHUB_SHA" \
+              --notes "LabelSheet $VERSION. Signed with the permanent LabelSheet certificate, so it installs over 1.8 and later without uninstalling and keeps your saved sheet."
           fi
