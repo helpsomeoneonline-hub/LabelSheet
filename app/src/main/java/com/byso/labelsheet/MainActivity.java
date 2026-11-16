@@ -116,9 +116,15 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(Theme.SURFACE);
+        // Strip behind the status bar (clock/battery) in the top-bar colour, sized to the real inset.
+        View statusStrip = new View(this);
+        statusStrip.setBackgroundColor(Theme.lighter(Theme.BAR, 0.16f));
+        root.addView(statusStrip, new LinearLayout.LayoutParams(-1, 0));
         root.setOnApplyWindowInsetsListener((v, insets) -> {
-            v.setPadding(insets.getSystemWindowInsetLeft(), insets.getSystemWindowInsetTop(),
+            v.setPadding(insets.getSystemWindowInsetLeft(), 0,
                     insets.getSystemWindowInsetRight(), insets.getSystemWindowInsetBottom());
+            LinearLayout.LayoutParams sp = (LinearLayout.LayoutParams) statusStrip.getLayoutParams();
+            if (sp.height != insets.getSystemWindowInsetTop()) { sp.height = insets.getSystemWindowInsetTop(); statusStrip.setLayoutParams(sp); }
             return insets;
         });
         root.requestApplyInsets();
@@ -132,34 +138,35 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
         canvasHost.addView(canvasView, new FrameLayout.LayoutParams(-1, -1));
         canvasHost.addView(buildZoomPill(), zoomPillParams());
 
-        root.addView(buildTopBar(), new LinearLayout.LayoutParams(-1, dp(60)));
-        root.addView(divider(true));
+        View top = buildTopBar();
+        top.setElevation(dp(6)); // glossy bar casts a shadow onto the page area
+        root.addView(top, new LinearLayout.LayoutParams(-1, dp(62)));
 
         tools = new LinearLayout(this);
         if (railLayout) {
             LinearLayout body = new LinearLayout(this);
             body.setOrientation(LinearLayout.HORIZONTAL);
             tools.setOrientation(LinearLayout.VERTICAL);
-            tools.setPadding(dp(6), dp(8), dp(6), dp(8));
+            tools.setPadding(dp(10), dp(12), dp(10), dp(12));
             ScrollView rail = new ScrollView(this);
-            rail.setBackgroundColor(Theme.SURFACE);
+            rail.setBackground(Depth.panel(true));
             rail.setVerticalScrollBarEnabled(false);
+            rail.setElevation(dp(4));
             rail.addView(tools, new FrameLayout.LayoutParams(-1, -2));
-            body.addView(rail, new LinearLayout.LayoutParams(dp(cfg.smallestScreenWidthDp >= 600 ? 96 : 88), -1));
-            body.addView(divider(false));
+            body.addView(rail, new LinearLayout.LayoutParams(dp(cfg.smallestScreenWidthDp >= 600 ? 108 : 96), -1));
             body.addView(canvasHost, new LinearLayout.LayoutParams(0, -1, 1f));
             root.addView(body, new LinearLayout.LayoutParams(-1, 0, 1f));
         } else {
             root.addView(canvasHost, new LinearLayout.LayoutParams(-1, 0, 1f));
-            root.addView(divider(true));
             tools.setOrientation(LinearLayout.HORIZONTAL);
-            tools.setPadding(dp(4), dp(4), dp(4), dp(4));
+            tools.setPadding(dp(8), dp(9), dp(8), dp(10));
             HorizontalScrollView bar = new HorizontalScrollView(this);
-            bar.setBackgroundColor(Theme.SURFACE);
+            bar.setBackground(Depth.panel(false));
+            bar.setElevation(dp(6));
             bar.setHorizontalScrollBarEnabled(false);
             bar.setFillViewport(true);
             bar.addView(tools, new FrameLayout.LayoutParams(-2, -1));
-            root.addView(bar, new LinearLayout.LayoutParams(-1, dp(76)));
+            root.addView(bar, new LinearLayout.LayoutParams(-1, dp(86)));
         }
         return root;
     }
@@ -168,18 +175,20 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
         LinearLayout bar = new LinearLayout(this);
         bar.setOrientation(LinearLayout.HORIZONTAL);
         bar.setGravity(Gravity.CENTER_VERTICAL);
-        bar.setBackgroundColor(Theme.SURFACE);
+        bar.setBackground(Depth.glossyBar(Theme.BAR));
         bar.setPadding(dp(16), 0, dp(10), 0);
 
         LinearLayout titles = new LinearLayout(this);
         titles.setOrientation(LinearLayout.VERTICAL);
         TextView title = new TextView(this);
         title.setText("LabelSheet");
-        title.setTextColor(Theme.TEXT);
-        title.setTextSize(19);
-        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
+        title.setTextColor(Theme.ON_BAR);
+        title.setTextSize(20);
+        title.setTypeface(Typeface.create("sans-serif", Typeface.BOLD));
+        if (Theme.BAR_DARK) title.setShadowLayer(dp(2), 0, dp(1), 0x59000000);
         subtitle = new TextView(this);
-        subtitle.setTextColor(Theme.TEXT_SOFT);
+        subtitle.setTextColor((Theme.ON_BAR & 0x00FFFFFF) | 0xD9000000);
+        subtitle.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         subtitle.setTextSize(12);
         subtitle.setSingleLine(true);
         subtitle.setEllipsize(android.text.TextUtils.TruncateAt.END);
@@ -199,7 +208,7 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
         print.setCompoundDrawablePadding(dp(8));
         print.setAllCaps(false);
         print.setTextSize(15);
-        print.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        print.setTypeface(Typeface.create("sans-serif", Typeface.BOLD));
         print.setTextColor(Theme.ON_PRIMARY);
         android.graphics.drawable.Drawable pi = getDrawable(R.drawable.ic_print).mutate();
         pi.setTint(Theme.ON_PRIMARY);
@@ -208,12 +217,14 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
         print.setPadding(dp(16), 0, dp(18), 0);
         print.setMinHeight(0); print.setMinimumHeight(0); print.setMinWidth(0); print.setMinimumWidth(0);
         print.setStateListAnimator(null);
-        print.setBackground(pill(Theme.PRIMARY, 0, 24));
+        print.setBackground(Depth.raised(Theme.lighter(Theme.PRIMARY, 0.35f), Theme.PRIMARY,
+                Theme.darker(Theme.PRIMARY, 0.30f), dp(23), dp(3), true));
+        print.setElevation(dp(5));
         print.setContentDescription("Print sheet. Long-press for printer settings.");
         print.setOnClickListener(v -> { UsageInsights.record(this, "Print"); printSheet(); });
         print.setOnLongClickListener(v -> { showPrinterSettingsDialog(); return true; });
-        LinearLayout.LayoutParams pp = new LinearLayout.LayoutParams(-2, dp(44));
-        pp.leftMargin = dp(6);
+        LinearLayout.LayoutParams pp = new LinearLayout.LayoutParams(-2, dp(46));
+        pp.leftMargin = dp(10);
         bar.addView(print, pp);
         return bar;
     }
@@ -222,8 +233,9 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
         LinearLayout pill = new LinearLayout(this);
         pill.setOrientation(LinearLayout.HORIZONTAL);
         pill.setGravity(Gravity.CENTER_VERTICAL);
-        pill.setBackground(pill(Theme.SURFACE, Theme.OUTLINE, 22));
-        pill.setElevation(dp(3));
+        pill.setBackground(Depth.raised(Theme.TILE_TOP, Theme.TILE_BOTTOM, Theme.TILE_LIP, dp(23), dp(3), false));
+        pill.setElevation(dp(6));
+        pill.setPadding(0, 0, 0, dp(3));
         TextView minus = zoomText("−", "Zoom out");
         minus.setOnClickListener(v -> canvasView.zoomBy(0.8f));
         zoomLabel = zoomText("100%", "Fit page and side area. Long-press to zoom to the selected picture.");
@@ -250,6 +262,7 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
         t.setText(s);
         t.setGravity(Gravity.CENTER);
         t.setTextColor(Theme.TEXT);
+        t.setTypeface(Typeface.DEFAULT_BOLD);
         t.setTextSize(20);
         t.setContentDescription(description);
         t.setBackground(ripple(22));
@@ -341,9 +354,9 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
             action.run();
         });
         LinearLayout.LayoutParams lp = railLayout
-                ? new LinearLayout.LayoutParams(-1, dp(66))
+                ? new LinearLayout.LayoutParams(-1, dp(70))
                 : new LinearLayout.LayoutParams(dp(64), -1);
-        if (railLayout) lp.bottomMargin = dp(2); else lp.rightMargin = dp(2);
+        if (railLayout) lp.bottomMargin = dp(10); else lp.rightMargin = dp(8);
         tools.addView(t, lp);
         return t;
     }
@@ -353,7 +366,7 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
         if (!railLayout) return;
         TextView t = new TextView(this);
         t.setText(text.toUpperCase(java.util.Locale.US));
-        t.setTextColor(Theme.TEXT_SOFT);
+        t.setTextColor(Theme.HILITE);
         t.setTextSize(10.5f);
         t.setLetterSpacing(0.06f);
         t.setTypeface(Typeface.DEFAULT_BOLD);
@@ -975,7 +988,7 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
         bar.setOrientation(LinearLayout.HORIZONTAL);
         bar.setGravity(Gravity.CENTER_VERTICAL);
         bar.setPadding(dp(16), 0, dp(4), 0);
-        bar.setBackground(pill(Theme.SNACK, 0, 12));
+        bar.setBackground(Depth.raised(Theme.lighter(Theme.SNACK, 0.12f), Theme.SNACK, Theme.darker(Theme.SNACK, 0.4f), dp(14), dp(2), false));
         bar.setElevation(dp(6));
         TextView t = new TextView(this);
         t.setText(message);
@@ -1485,12 +1498,12 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
 
     private void applyWindowColors() {
         android.view.Window w = getWindow();
-        w.setStatusBarColor(Theme.SURFACE);
+        w.setStatusBarColor(Theme.lighter(Theme.BAR, 0.16f));
         w.setNavigationBarColor(Theme.SURFACE);
         w.setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(Theme.SURFACE));
         View decor = w.getDecorView();
         int flags = decor.getSystemUiVisibility();
-        if (Theme.DARK) flags &= ~View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR; else flags |= View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
+        if (Theme.BAR_DARK) flags &= ~View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR; else flags |= View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
         if (Build.VERSION.SDK_INT >= 26) {
             if (Theme.DARK) flags &= ~View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR; else flags |= View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
         }
@@ -1509,7 +1522,20 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
         AlertDialog dlg = dialog().setTitle("Color scheme").setView(scroll)
                 .setNeutralButton("Customize…", (d, w) -> showCustomizeScheme())
                 .setPositiveButton("Done", null).create();
+        String group = null;
         for (Theme.Scheme sc : all) {
+            String g = "custom".equals(sc.id) ? "Yours" : (sc.bold ? "Bold" : "Soft");
+            if (!g.equals(group)) {
+                group = g;
+                TextView h = new TextView(this);
+                h.setText(g.toUpperCase(java.util.Locale.US));
+                h.setTextSize(11.5f);
+                h.setLetterSpacing(0.08f);
+                h.setTypeface(Typeface.DEFAULT_BOLD);
+                h.setTextColor(Theme.HILITE);
+                h.setPadding(dp(12), dp(12), 0, dp(4));
+                list.addView(h);
+            }
             LinearLayout row = new LinearLayout(this);
             row.setOrientation(LinearLayout.HORIZONTAL);
             row.setGravity(Gravity.CENTER_VERTICAL);
@@ -1528,7 +1554,7 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
             if (isCurrent) {
                 android.widget.ImageView check = new android.widget.ImageView(this);
                 check.setImageResource(R.drawable.ic_check);
-                check.setImageTintList(ColorStateList.valueOf(Theme.PRIMARY));
+                check.setImageTintList(ColorStateList.valueOf(Theme.HILITE));
                 row.addView(check, new LinearLayout.LayoutParams(dp(28), dp(28)));
             }
             row.setOnClickListener(v -> {
@@ -1559,7 +1585,7 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
         bar.setBackground(barBg);
         f.addView(bar, new FrameLayout.LayoutParams(-1, dp(15), Gravity.TOP));
         View line = new View(this);
-        line.setBackgroundColor(sc.text);
+        line.setBackgroundColor(Theme.bestOn(sc.bars));
         FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(dp(26), dp(3), Gravity.TOP | Gravity.START);
         lp.setMargins(dp(7), dp(6), 0, 0);
         f.addView(line, lp);
@@ -1579,7 +1605,7 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
         return f;
     }
 
-    private static final String[] ROLE_NAMES = {"Accent (buttons, selection)", "Bars", "Around the page", "Text and icons"};
+    private static final String[] ROLE_NAMES = {"Action color (Add, Print)", "Top bar", "Around the page", "Text and icons"};
 
     private void showCustomizeScheme() {
         final Theme.Scheme original = Theme.current;
@@ -1753,11 +1779,13 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
     private ImageButton iconButton(int icon, String description, View.OnClickListener click) {
         ImageButton b = new ImageButton(this);
         b.setImageResource(icon);
-        b.setImageTintList(ColorStateList.valueOf(Theme.TEXT));
-        b.setBackground(ripple(22));
+        b.setImageTintList(ColorStateList.valueOf(Theme.ON_BAR));
+        b.setBackground(Depth.glass(Theme.ON_BAR, dp(14)));
         b.setContentDescription(description);
         b.setOnClickListener(click);
-        b.setLayoutParams(new LinearLayout.LayoutParams(dp(46), dp(46)));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(44), dp(44));
+        lp.leftMargin = dp(5);
+        b.setLayoutParams(lp);
         return b;
     }
 
@@ -1768,7 +1796,7 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
         b.setTextSize(14);
         b.setMinHeight(0); b.setMinimumHeight(0); b.setMinWidth(0); b.setMinimumWidth(0);
         b.setStateListAnimator(null);
-        b.setTextColor(primary ? Theme.ON_PRIMARY : Theme.PRIMARY);
+        b.setTextColor(primary ? Theme.ON_PRIMARY : Theme.HILITE);
         b.setBackground(primary ? pill(Theme.PRIMARY, 0, 22) : ripple(22));
         b.setPadding(dp(18), 0, dp(18), 0);
         LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(-2, dp(44));

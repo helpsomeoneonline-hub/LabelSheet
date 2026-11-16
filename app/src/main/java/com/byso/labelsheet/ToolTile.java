@@ -3,15 +3,14 @@ package com.byso.labelsheet;
 import android.content.Context;
 import android.content.res.ColorStateList;
 import android.graphics.Typeface;
-import android.graphics.drawable.GradientDrawable;
-import android.graphics.drawable.RippleDrawable;
 import android.text.TextUtils;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
-/** Icon-over-label tool button used by the bottom bar (phones) and the side rail (tablets / landscape). */
+/** Raised 3D tool button (icon over label) for the bottom bar (phones) and side rail (tablets / landscape). */
 final class ToolTile extends LinearLayout {
     static final int STYLE_NORMAL = 0;
     static final int STYLE_PRIMARY = 1;
@@ -29,15 +28,14 @@ final class ToolTile extends LinearLayout {
         setClickable(true);
         setFocusable(true);
         setContentDescription(text);
-        setPadding(dp(4), dp(6), dp(4), dp(6));
+        setPadding(dp(4), dp(4), dp(4), dp(7));
         setMinimumHeight(dp(56));
         setMinimumWidth(dp(56));
 
         icon = new ImageView(c);
         icon.setImageResource(iconRes);
         icon.setScaleType(ImageView.ScaleType.CENTER);
-        LayoutParams ip = new LayoutParams(dp(40), dp(30));
-        addView(icon, ip);
+        addView(icon, new LayoutParams(dp(30), dp(28)));
 
         label = new TextView(c);
         label.setText(text);
@@ -45,9 +43,9 @@ final class ToolTile extends LinearLayout {
         label.setGravity(Gravity.CENTER);
         label.setSingleLine(true);
         label.setEllipsize(TextUtils.TruncateAt.END);
-        label.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        label.setTypeface(Typeface.create("sans-serif", Typeface.BOLD));
         LayoutParams lp = new LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT);
-        lp.topMargin = dp(2);
+        lp.topMargin = dp(1);
         addView(label, lp);
         apply();
     }
@@ -58,32 +56,38 @@ final class ToolTile extends LinearLayout {
 
     @Override public void setEnabled(boolean enabled) {
         super.setEnabled(enabled);
-        setAlpha(enabled ? 1f : 0.38f);
+        setAlpha(enabled ? 1f : 0.4f);
+        apply();
+    }
+
+    /** Sinks the button slightly while a finger is on it, like a real key. */
+    @Override public boolean onTouchEvent(MotionEvent e) {
+        if (isEnabled()) {
+            int a = e.getActionMasked();
+            if (a == MotionEvent.ACTION_DOWN) { setTranslationY(dp(2)); setElevation(dp(1)); }
+            else if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL) { setTranslationY(0); apply(); }
+        }
+        return super.onTouchEvent(e);
     }
 
     private void apply() {
+        float r = dp(16);
         int fg;
-        GradientDrawable wellBg = new GradientDrawable();
-        wellBg.setCornerRadius(dp(15));
         if (style == STYLE_PRIMARY) {
-            fg = Theme.PRIMARY;
-            wellBg.setColor(Theme.PRIMARY);
-            icon.setImageTintList(ColorStateList.valueOf(Theme.ON_PRIMARY));
+            fg = Theme.ON_PRIMARY;
+            setBackground(Depth.raised(Theme.lighter(Theme.PRIMARY, 0.30f), Theme.PRIMARY, Theme.darker(Theme.PRIMARY, 0.30f), r, dp(3), true));
+            setElevation(isEnabled() ? dp(5) : 0);
         } else if (active) {
-            fg = Theme.PRIMARY;
-            wellBg.setColor(Theme.PRIMARY_SOFT);
-            icon.setImageTintList(ColorStateList.valueOf(Theme.PRIMARY));
+            fg = Theme.HILITE;
+            setBackground(Depth.pressed(Theme.PRESSED_TOP, Theme.PRESSED_BOTTOM, r));
+            setElevation(0);
         } else {
             fg = style == STYLE_DANGER ? Theme.DANGER : Theme.TEXT;
-            wellBg.setColor(0x00000000);
-            icon.setImageTintList(ColorStateList.valueOf(fg));
+            setBackground(Depth.raised(Theme.TILE_TOP, Theme.TILE_BOTTOM, Theme.TILE_LIP, r, dp(3), true));
+            setElevation(isEnabled() ? dp(3) : 0);
         }
-        icon.setBackground(wellBg);
-        label.setTextColor(style == STYLE_PRIMARY ? Theme.PRIMARY : fg);
-        GradientDrawable mask = new GradientDrawable();
-        mask.setColor(0xFFFFFFFF);
-        mask.setCornerRadius(dp(14));
-        setBackground(new RippleDrawable(ColorStateList.valueOf(Theme.RIPPLE), null, mask));
+        icon.setImageTintList(ColorStateList.valueOf(fg));
+        label.setTextColor(fg);
     }
 
     private int dp(float v) { return Math.round(v * getResources().getDisplayMetrics().density); }

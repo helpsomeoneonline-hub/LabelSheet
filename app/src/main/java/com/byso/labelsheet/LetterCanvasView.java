@@ -383,11 +383,12 @@ public class LetterCanvasView extends View {
         touchSlop = 4f * getResources().getDisplayMetrics().density;
 
         pagePaint.setColor(Color.WHITE);
-        pagePaint.setShadowLayer(16f, 0f, 6f, 0x55000000);
+        pagePaint.setShadowLayer(26f * getResources().getDisplayMetrics().density / 2f, 0f, 9f * getResources().getDisplayMetrics().density, 0x66000000);
 
         selectedPaint.setStyle(Paint.Style.STROKE);
         selectedPaint.setStrokeWidth(2.2f * getResources().getDisplayMetrics().density);
-        selectedPaint.setColor(Theme.PRIMARY);
+        selectedPaint.setColor(Theme.SELECT);
+        selectedPaint.setStrokeWidth(3f * getResources().getDisplayMetrics().density);
 
         safePaint.setStyle(Paint.Style.STROKE);
         safePaint.setStrokeWidth(1f * getResources().getDisplayMetrics().density);
@@ -396,14 +397,14 @@ public class LetterCanvasView extends View {
 
         guidePaint.setStyle(Paint.Style.STROKE);
         guidePaint.setStrokeWidth(1.3f * getResources().getDisplayMetrics().density);
-        guidePaint.setColor(Theme.PRIMARY);
+        guidePaint.setColor(Theme.SELECT);
 
         float d = getResources().getDisplayMetrics().density;
         boardPaint.setColor(Theme.BOARD);
         boardEdgePaint.setStyle(Paint.Style.STROKE);
         boardEdgePaint.setStrokeWidth(1.2f * d);
         boardEdgePaint.setColor(Theme.BOARD_EDGE);
-        boardEdgePaint.setPathEffect(new DashPathEffect(new float[]{6f * d, 5f * d}, 0f));
+        boardEdgePaint.setAlpha(110);
         captionPaint.setColor(Theme.CAPTION);
         captionPaint.setTextSize(11.5f * d);
         captionPaint.setTypeface(android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD));
@@ -426,7 +427,7 @@ public class LetterCanvasView extends View {
         frameWhite.setColor(Color.WHITE);
         frameAccent.setStyle(Paint.Style.STROKE);
         frameAccent.setStrokeWidth(1.5f * d);
-        frameAccent.setColor(Theme.PRIMARY);
+        frameAccent.setColor(Theme.SELECT);
         thirdsPaint.setStyle(Paint.Style.STROKE);
         thirdsPaint.setStrokeWidth(1f * d);
         thirdsPaint.setColor(0x99FFFFFF);
@@ -1219,8 +1220,7 @@ public class LetterCanvasView extends View {
         float d = getResources().getDisplayMetrics().density;
         RectF board = new RectF(pageRect.left - BOARD_X * pw, pageRect.top - BOARD_Y * ph,
                 pageRect.right + BOARD_X * pw, pageRect.bottom + BOARD_Y * ph);
-        canvas.drawRoundRect(board, 14f * d, 14f * d, boardPaint);
-        canvas.drawRoundRect(board, 14f * d, 14f * d, boardEdgePaint);
+        drawRecessed(canvas, board, 18f * d);
         String cap = "SIDE AREA • NOT PRINTED";
         float capW = captionPaint.measureText(cap);
         float visibleRight = Math.min(board.right, getWidth());
@@ -1243,7 +1243,13 @@ public class LetterCanvasView extends View {
             if (item.bitmap == null) continue;
             if (cropMode && i == cropIndex) continue;
             boolean selectedState = selectedSet.contains(i) || i == selected;
+            RectF sr = itemRect(item, pageRect);
+            canvas.save();
+            canvas.rotate(item.rotation, sr.centerX(), sr.centerY());
+            canvas.drawRect(sr, itemShadowPaint); // on-screen depth only; never printed
+            canvas.restore();
             drawItem(canvas, item, pageRect, selectedState, i == selected && !item.locked);
+            if (multiSelectMode && selectedSet.contains(i)) drawPickBadge(canvas, sr.right, sr.top);
             RectF r = itemRect(item, pageRect);
             if (!touchesPage(item)) {
                 // Parked: veil + "Not printed" tag so it is obvious at a glance.
@@ -1314,25 +1320,88 @@ public class LetterCanvasView extends View {
         if (selectedState) {
             canvas.drawRect(dst, selectedPaint);
             if (!showHandles) { canvas.restore(); return; }
-            float r = 4.5f * getResources().getDisplayMetrics().density;
+            float dd = getResources().getDisplayMetrics().density;
+            float r = 6.5f * dd;
             Paint handle = new Paint(Paint.ANTI_ALIAS_FLAG);
-            handle.setColor(Color.WHITE);
             handle.setStyle(Paint.Style.FILL);
+            handle.setShadowLayer(2.5f * dd, 0f, 1.5f * dd, 0x66000000);
             float[][] handles = new float[][]{
                     {dst.left, dst.top}, {dst.centerX(), dst.top}, {dst.right, dst.top},
                     {dst.left, dst.centerY()}, {dst.right, dst.centerY()},
                     {dst.left, dst.bottom}, {dst.centerX(), dst.bottom}, {dst.right, dst.bottom}
             };
             Paint edge = new Paint(Paint.ANTI_ALIAS_FLAG);
-            edge.setColor(Theme.PRIMARY);
+            edge.setColor(Theme.SELECT);
             edge.setStyle(Paint.Style.STROKE);
-            edge.setStrokeWidth(2f * getResources().getDisplayMetrics().density);
+            edge.setStrokeWidth(2.5f * dd);
             for (float[] hp : handles) {
+                handle.setShader(new android.graphics.RadialGradient(hp[0] - r * 0.3f, hp[1] - r * 0.35f, r * 1.4f,
+                        Color.WHITE, 0xFFD5DCE6, android.graphics.Shader.TileMode.CLAMP));
                 canvas.drawCircle(hp[0], hp[1], r, handle);
                 canvas.drawCircle(hp[0], hp[1], r, edge);
             }
         }
         canvas.restore();
+    }
+
+    private final Paint itemShadowPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    {
+        itemShadowPaint.setColor(Color.WHITE);
+        itemShadowPaint.setShadowLayer(5f * getResources().getDisplayMetrics().density, 0f,
+                2.5f * getResources().getDisplayMetrics().density, 0x55000000);
+    }
+
+    /** Side area drawn as a groove pressed into the surface: fill, inner top shadow, light bottom lip. */
+    private void drawRecessed(Canvas canvas, RectF r, float radius) {
+        float d = getResources().getDisplayMetrics().density;
+        canvas.drawRoundRect(r, radius, radius, boardPaint);
+        canvas.save();
+        android.graphics.Path clip = new android.graphics.Path();
+        clip.addRoundRect(r, radius, radius, android.graphics.Path.Direction.CW);
+        canvas.clipPath(clip);
+        Paint inner = new Paint(Paint.ANTI_ALIAS_FLAG);
+        inner.setShader(new android.graphics.LinearGradient(0, r.top, 0, r.top + 14f * d,
+                0x47000000, 0x00000000, android.graphics.Shader.TileMode.CLAMP));
+        canvas.drawRect(r.left, r.top, r.right, r.top + 14f * d, inner);
+        inner.setShader(new android.graphics.LinearGradient(r.left, 0, r.left + 10f * d, 0,
+                0x26000000, 0x00000000, android.graphics.Shader.TileMode.CLAMP));
+        canvas.drawRect(r.left, r.top, r.left + 10f * d, r.bottom, inner);
+        canvas.restore();
+        Paint lip = new Paint(Paint.ANTI_ALIAS_FLAG);
+        lip.setStyle(Paint.Style.STROKE);
+        lip.setStrokeWidth(1.2f * d);
+        lip.setColor(Theme.DARK ? 0x22FFFFFF : 0x99FFFFFF);
+        RectF lr = new RectF(r.left, r.top + 1.2f * d, r.right, r.bottom + 1.2f * d);
+        canvas.save();
+        canvas.clipRect(r.left, r.centerY(), r.right, r.bottom + 3f * d);
+        canvas.drawRoundRect(lr, radius, radius, lip);
+        canvas.restore();
+        canvas.drawRoundRect(r, radius, radius, boardEdgePaint);
+    }
+
+    /** Round check badge on pictures picked in multi-select. */
+    private void drawPickBadge(Canvas canvas, float cx, float cy) {
+        float d = getResources().getDisplayMetrics().density;
+        float r = 12f * d;
+        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        p.setColor(Theme.SELECT);
+        p.setShadowLayer(3f * d, 0f, 1.5f * d, 0x66000000);
+        canvas.drawCircle(cx, cy, r, p);
+        p.clearShadowLayer();
+        p.setStyle(Paint.Style.STROKE);
+        p.setStrokeWidth(2f * d);
+        p.setColor(Color.WHITE);
+        canvas.drawCircle(cx, cy, r, p);
+        p.setStrokeWidth(2.6f * d);
+        p.setStrokeCap(Paint.Cap.ROUND);
+        p.setStrokeJoin(Paint.Join.ROUND);
+        android.graphics.Path check = new android.graphics.Path();
+        check.moveTo(cx - 5f * d, cy + 0.5f * d);
+        check.lineTo(cx - 1.5f * d, cy + 4f * d);
+        check.lineTo(cx + 5.5f * d, cy - 4f * d);
+        int on = Theme.bestOn(Theme.SELECT);
+        p.setColor(on);
+        canvas.drawPath(check, p);
     }
 
     private void drawBadge(Canvas canvas, String text, float x, float y) {
