@@ -301,7 +301,7 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
             tile(R.drawable.ic_select, "Select", 0, any, false, () -> canvasView.setMultiSelectMode(true));
             boolean portrait = canvasView.isPortrait();
             tile(portrait ? R.drawable.ic_page_landscape : R.drawable.ic_page_portrait,
-                    portrait ? "Landscape" : "Portrait", 0, true, false, this::toggleOrientation);
+                    "Turn page", 0, true, false, this::toggleOrientation);
             return;
         }
 
@@ -332,7 +332,7 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
         });
         LinearLayout.LayoutParams lp = railLayout
                 ? new LinearLayout.LayoutParams(-1, dp(66))
-                : new LinearLayout.LayoutParams(dp(68), -1);
+                : new LinearLayout.LayoutParams(dp(64), -1);
         if (railLayout) lp.bottomMargin = dp(2); else lp.rightMargin = dp(2);
         tools.addView(t, lp);
         return t;
