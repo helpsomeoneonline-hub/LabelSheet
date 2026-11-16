@@ -79,6 +79,20 @@ public class LetterCanvasView extends View {
     private static final int HANDLE_BL = 7;
     private static final int HANDLE_BR = 8;
     private boolean gestureUndoPushed = false;
+    // Long-press a picture to start picking several (then tap others to add/remove).
+    private boolean longPressFired = false;
+    private final Runnable longPress = () -> {
+        if (dragging || panningCanvas || this.cropMode || downHitIndex < 0 || downHitIndex >= items.size()) return;
+        longPressFired = true;
+        multiSelectMode = true;
+        selectedSet.clear();
+        selectedSet.add(downHitIndex);
+        selected = downHitIndex;
+        performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS);
+        Diagnostics.log("MULTI_SELECT_MODE", "on (long-press)");
+        invalidate();
+        if (listener != null) listener.onSelectionChanged(true);
+    };
     private boolean showGuideX = false;
     private boolean showGuideY = false;
     private float guideXNorm = 0.5f;
@@ -1386,6 +1400,10 @@ public class LetterCanvasView extends View {
                 int hit = resizeHandle != HANDLE_NONE ? selected : hitTest(downX, downY);
                 downHitIndex = hit;
                 downHitWasSelected = hit >= 0 && selectedSet.contains(hit);
+                longPressFired = false;
+                removeCallbacks(longPress);
+                if (!multiSelectMode && hit >= 0 && resizeHandle == HANDLE_NONE)
+                    postDelayed(longPress, android.view.ViewConfiguration.getLongPressTimeout());
 
                 if (multiSelectMode && resizeHandle == HANDLE_NONE) {
                     if (hit >= 0) {
@@ -1429,9 +1447,11 @@ public class LetterCanvasView extends View {
             }
 
             case MotionEvent.ACTION_MOVE: {
-                if (scaleDetector.isInProgress()) return true;
+                if (scaleDetector.isInProgress()) { removeCallbacks(longPress); return true; }
                 float dx = event.getX() - downX;
                 float dy = event.getY() - downY;
+                if (Math.hypot(dx, dy) > touchSlop) removeCallbacks(longPress);
+                if (longPressFired) return true; // finger still down after long-press: don't drag
 
                 if (panningCanvas) {
                     if (!dragging && Math.hypot(dx, dy) > touchSlop) dragging = true;
@@ -1472,12 +1492,17 @@ public class LetterCanvasView extends View {
             case MotionEvent.ACTION_CANCEL: {
                 showGuideX = false;
                 showGuideY = false;
-                if (multiSelectMode && !dragging && !panningCanvas && resizeHandle == HANDLE_NONE &&
-                        downHitIndex >= 0 && downHitWasSelected && selectedSet.size() > 1) {
+                removeCallbacks(longPress);
+                if (event.getPointerCount() > 1 || event.getActionMasked() == MotionEvent.ACTION_CANCEL) { /* no tap */ }
+                else if (!longPressFired && multiSelectMode && !dragging && !panningCanvas && resizeHandle == HANDLE_NONE &&
+                        downHitIndex >= 0 && downHitWasSelected) {
+                    // Tap an already-picked picture to unpick it; unpicking the last one leaves multi-select.
                     selectedSet.remove(downHitIndex);
-                    if (selected == downHitIndex) selected = selectedSet.iterator().next();
+                    if (selectedSet.isEmpty()) { selected = -1; multiSelectMode = false; }
+                    else if (selected == downHitIndex) selected = selectedSet.iterator().next();
                     if (listener != null) listener.onSelectionChanged(hasSelection());
                 }
+                longPressFired = false;
                 if (dragging && gestureUndoPushed && listener != null) listener.onSheetChanged();
                 if (dragging && resizeHandle != HANDLE_NONE && hasSelection()) {
                     SheetItem item = items.get(selected);

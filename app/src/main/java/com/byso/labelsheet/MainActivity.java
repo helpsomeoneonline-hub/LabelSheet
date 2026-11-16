@@ -290,6 +290,7 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
                 canvasView.setMultiSelectMode(false);
                 canvasView.clearSelection();
             });
+            tile(R.drawable.ic_delete, "Delete", ToolTile.STYLE_DANGER, editable > 0, false, this::deleteSelection);
             tile(R.drawable.ic_select, "All", 0, canvasView.getItemCount() > 0, false, canvasView::selectAll);
             tile(R.drawable.ic_align, "Align", 0, n >= 2, false, this::showAlignMenu);
             tile(R.drawable.ic_space, "Space", 0, n >= 3, false, this::showSpaceMenu);
@@ -299,7 +300,6 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
             tile(R.drawable.ic_size, "Size", 0, editable > 0, false, this::showExactSizeDialog);
             tile(R.drawable.ic_park, canvasView.isSelectedOffPage() ? "On page" : "Off page", 0, editable > 0, false, this::toggleParking);
             tile(R.drawable.ic_more_horiz, "More", 0, n > 0, false, this::showMultiMoreMenu);
-            tile(R.drawable.ic_delete, "Delete", ToolTile.STYLE_DANGER, editable > 0, false, this::deleteSelection);
             return;
         }
 
@@ -868,7 +868,7 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
                         + "• Drag to move. Corner handles keep proportions; side handles stretch one way.\n"
                         + "• Off page moves a picture into the grey side area (or just drag it there). Anything outside the page is NOT printed — handy for labels you'll use later. Tap On page to bring it back.\n"
                         + "• Pictures crossing the page edge get an orange outline and will be cut off when printed.\n"
-                        + "• Select lets you pick several pictures to align, space, border, size or delete together.\n"
+                        + "• Long-press a picture to start picking several, then tap others to add them. Delete, align, space, border or size them together.\n"
                         + "• Pinch or use − / + to zoom. Tap the % to fit everything.\n\n"
                         + "Printing: Print wakes the " + DEFAULT_PRINTER_NAME + " (searching 192.168.58.100–110) before opening Android printing. Long-press Print for printer settings. Keep scaling at 100% / Actual size for exact label sizes.\n\n"
                         + "Troubleshooting: ⋮ → Troubleshooting → Copy diagnostic log. The log records actions and errors, never your label images.")
@@ -1351,7 +1351,7 @@ public class MainActivity extends Activity implements LetterCanvasView.Listener 
             text = "Drag the corners or edges to trim • drag inside to move";
         } else if (canvasView.isMultiSelectMode()) {
             int n = canvasView.getSelectionCount();
-            text = n == 0 ? "Tap pictures to select them" : n + " selected";
+            text = n == 0 ? "Tap pictures to pick them" : n + " picked • tap more to add or remove";
         } else if (canvasView.hasSelection()) {
             text = canvasView.selectedSizeText();
         } else {
